@@ -173,7 +173,7 @@ def main():
     device = torch.device(args.device)
 
     # Hard-coded single image inference (edit this filename as needed)
-    target_image_name = "03250.png"
+    target_image_name = "Area_3_4_rooms.png"
     
     print(f"--- RoomFormer Inference ---")
     print(f"Input:  {args.input_dir}")
