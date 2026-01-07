@@ -36,7 +36,7 @@ def get_args():
     
     # --- PATHS ---
     default_input = project_root / 'data' / 'density_image'
-    default_output = project_root / 'data' / 'outputs' / 'reconstructed_floorplans_RoomFormer'
+    default_output = project_root / 'data' / 'reconstructed_floorplans_RoomFormer'
     default_ckpt = roomformer_root / 'checkpoints' / 'roomformer_stru3d.pth'
 
     parser.add_argument('--input_dir', type=str, default=str(default_input))
