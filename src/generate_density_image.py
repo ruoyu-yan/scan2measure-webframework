@@ -19,17 +19,18 @@ output_dir = project_root / "data" / "density_image"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 # -------------------------------------------------------------------------
-# 1. ALIGNMENT LOGIC (Right Side Up)
+# 1. VERTICAL ALIGNMENT (Floor Flat on XY Plane)
 # -------------------------------------------------------------------------
 def align_to_floor(pcd):
     print("  > Detecting dominant plane (floor)...")
     
+    # RANSAC to find the largest plane
     plane_model, inliers = pcd.segment_plane(distance_threshold=0.05,
                                              ransac_n=3,
                                              num_iterations=1000)
     [a, b, c, d] = plane_model
 
-    # 1. Rotate plane normal [a, b, c] to align with Z+ [0, 0, 1]
+    # Rotate plane normal to align with Z+
     normal = np.array([a, b, c])
     target = np.array([0, 0, 1])
     
@@ -45,25 +46,56 @@ def align_to_floor(pcd):
 
     pcd.rotate(R, center=(0, 0, 0))
 
-    # 2. Upside Down Check
+    # Upside Down Check
     points = np.asarray(pcd.points)
     floor_z = np.median(points[inliers, 2])
     room_z = np.median(np.delete(points, inliers, axis=0)[:, 2])
 
     if room_z < floor_z:
-        print("    Detected ceiling as plane (room is below). Flipping 180 degrees...")
+        print("    Detected ceiling as plane. Flipping 180 degrees...")
         R_flip = pcd.get_rotation_matrix_from_xyz((np.pi, 0, 0))
         pcd.rotate(R_flip, center=(0, 0, 0))
     
     return pcd
 
 # -------------------------------------------------------------------------
-# 2. DENSITY MAP GENERATION (FIXED PROPORTIONS)
+# 2. HORIZONTAL ALIGNMENT (Walls Parallel to X/Y Axes)
+# -------------------------------------------------------------------------
+def align_to_axes(pcd):
+    print("  > Aligning walls to X/Y axes...")
+
+    # Estimate Normals
+    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
+    normals = np.asarray(pcd.normals)
+    
+    # Filter for Vertical Walls (Z component near 0)
+    is_wall = np.abs(normals[:, 2]) < 0.2
+    wall_normals = normals[is_wall]
+
+    if len(wall_normals) == 0:
+        print("    Warning: No vertical walls detected. Skipping horizontal alignment.")
+        return pcd
+
+    # Calculate angles in 2D
+    angles = np.arctan2(wall_normals[:, 1], wall_normals[:, 0])
+    
+    # Histogram analysis to find dominant direction
+    hist, edges = np.histogram(angles, bins=360, range=(-np.pi, np.pi))
+    peak_idx = np.argmax(hist)
+    dominant_angle = (edges[peak_idx] + edges[peak_idx+1]) / 2.0
+    
+    print(f"    Dominant wall angle detected: {np.degrees(dominant_angle):.2f} degrees")
+
+    # Rotate to align dominant angle with X-axis
+    R_yaw = pcd.get_rotation_matrix_from_xyz((0, 0, -dominant_angle))
+    pcd.rotate(R_yaw, center=(0,0,0))
+    
+    return pcd
+
+# -------------------------------------------------------------------------
+# 3. DENSITY MAP GENERATION (Proportional)
 # -------------------------------------------------------------------------
 def generate_density(point_cloud, width=256, height=256):
-    """
-    Modified implementation to maintain correct aspect ratio.
-    """
     # Structured3D utils flips axes before projecting. We keep this consistency.
     ps = point_cloud.copy() * -1
     ps[:, 0] *= -1
@@ -71,59 +103,42 @@ def generate_density(point_cloud, width=256, height=256):
 
     image_res = np.array((width, height))
 
-    # 1. Calculate physical bounds
+    # Calculate physical bounds and padding
     max_coords = np.max(ps, axis=0)
     min_coords = np.min(ps, axis=0)
     physical_dims = max_coords - min_coords
-
-    # 2. Add 10% padding relative to the dimensions
+    
     padding = 0.1 * physical_dims
     max_coords = max_coords + padding
     min_coords = min_coords - padding
 
-    # --- FIX STARTS HERE ---
-    
-    # Recalculate padded dimensions (only needed for X and Y)
+    # Uniform Scaling Logic
     padded_dims = max_coords[:2] - min_coords[:2]
-
-    # Find the single largest dimension (length or width)
     max_dim = np.max(padded_dims)
-
-    # Calculate offset to center the smaller dimension within the square canvas
-    # If X is smaller than Y, shift X over so it's centered.
     offset = (max_dim - padded_dims) / 2.0
 
-    # Project to 2D coordinates using UNIFORM scaling
-    # Note: We divide both X and Y by the SAME `max_dim` scalar.
+    # Project
     coordinates = (ps[:, :2] - min_coords[None, :2] + offset[None, :]) / max_dim * (image_res[None] - 1)
-    
-    # --- FIX ENDS HERE ---
-
     coordinates = np.round(coordinates)
-    coordinates = np.minimum(np.maximum(coordinates, np.zeros_like(image_res)),
-                                image_res - 1)
+    coordinates = np.minimum(np.maximum(coordinates, np.zeros_like(image_res)), image_res - 1)
 
+    # Fill Density
     density = np.zeros((height, width), dtype=np.float32)
-
     unique_coordinates, counts = np.unique(coordinates, return_counts=True, axis=0)
     unique_coordinates = unique_coordinates.astype(np.int32)
-
-    # Fill density map (note indices: y, x)
     density[unique_coordinates[:, 1], unique_coordinates[:, 0]] = counts
     
-    # Normalize
     if np.max(density) > 0:
         density = density / np.max(density)
 
     return density
 
 # -------------------------------------------------------------------------
-# 3. MAIN EXECUTION
+# 4. MAIN EXECUTION
 # -------------------------------------------------------------------------
 def main():
     # --- CONFIGURATION ---
-    FILENAME = "Area_3_4_rooms.ply"
-    VIZ = False
+    FILENAME = "lab_new_cleaned_no_roof.ply"
     # ---------------------
 
     input_path = input_dir / FILENAME
@@ -138,9 +153,9 @@ def main():
     pcd = o3d.io.read_point_cloud(str(input_path))
     if pcd.is_empty(): sys.exit(1)
     
-    # 2. Align
+    # 2. Align (Z and XY)
     pcd = align_to_floor(pcd)
-    if VIZ: o3d.visualization.draw_geometries([pcd])
+    pcd = align_to_axes(pcd)
 
     # 3. Units & Quantization
     points = np.asarray(pcd.points)
@@ -158,9 +173,10 @@ def main():
     
     density_img_vis = (density_map * 255).astype(np.uint8)
     
-    # 5. Save
+    # 5. Save (Filename matches input name exactly)
     out_name = input_path.stem + ".png"
     save_path = output_dir / out_name
+    
     cv2.imwrite(str(save_path), density_img_vis)
     print(f"Done! Saved to: {save_path.name}")
 
