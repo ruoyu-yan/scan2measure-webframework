@@ -1,18 +1,12 @@
 import os
 import cv2
 import numpy as np
-import glob
+import sys
 from tqdm import tqdm
 
-# ================= CONFIGURATION =================
-# Use absolute paths or paths relative to this script
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR) # Go up one level from src
-
-INPUT_DIR = os.path.join(PROJECT_ROOT, "data", "pano", "raw")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "pano", "processed")
-
-# Output Image Settings
+# ==========================================
+# 1. GLOBAL CONSTANTS (Core Algorithm Settings)
+# ==========================================
 OUTPUT_SIZE = (1024, 1024)  
 FOV = 60                    
 
@@ -27,7 +21,10 @@ VIEWS = [
     # --- Bottom Ring (2 photos, looking DOWN) ---
     (0, -90), (90, -90)
 ]
-# =================================================
+
+# ==========================================
+# 2. HELPER FUNCTIONS
+# ==========================================
 
 def get_perspective_map(fov, theta, phi, height, width):
     """
@@ -42,10 +39,8 @@ def get_perspective_map(fov, theta, phi, height, width):
     x, y = np.meshgrid(np.arange(width), np.arange(height))
     
     # Convert to normalized camera coordinates
-    # FIX: We negate y_c because in images, Y grows downwards, 
-    # but in 3D space (and latitude), Y grows upwards.
     x_c = (x - cx) / f
-    y_c = -(y - cy) / f  # <--- This fixes the Upside Down issue
+    y_c = -(y - cy) / f 
     z_c = np.ones_like(x_c)
     
     # Stack to form 3D vectors (x, y, z)
@@ -57,8 +52,6 @@ def get_perspective_map(fov, theta, phi, height, width):
 
     # Rotation Matrices
     theta_rad = np.radians(theta)
-    # FIX: Negate pitch because standard rotation matrices rotate the axis, not the vector.
-    # To "look up" (positive pitch), we effectively rotate the world down.
     phi_rad = np.radians(-phi) 
 
     # Rotation around X-axis (Pitch)
@@ -95,61 +88,78 @@ def get_perspective_map(fov, theta, phi, height, width):
 
     return lon, lat
 
-def process_panoramas():
-    if not os.path.exists(INPUT_DIR):
-        print(f"Error: Input directory not found: {INPUT_DIR}")
-        return
-        
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-
-    # Find all images
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
-    input_files = []
-    for ext in image_extensions:
-        input_files.extend(glob.glob(os.path.join(INPUT_DIR, ext)))
-
-    if not input_files:
-        print(f"No images found in {INPUT_DIR}")
+def process_panorama_views(input_path, output_folder):
+    """
+    Loads a single panorama and generates the 14 virtual camera views.
+    """
+    # 1. Load Image
+    img = cv2.imread(input_path)
+    if img is None:
+        print(f"[Error] Could not read image: {input_path}")
         return
 
-    print(f"Found {len(input_files)} panoramas to process.")
-
-    for file_path in input_files:
-        filename = os.path.basename(file_path)
-        name_no_ext = os.path.splitext(filename)[0]
+    h_pano, w_pano = img.shape[:2]
+    print(f"Generating {len(VIEWS)} virtual camera views...")
+    
+    # 2. Process Views
+    for idx, (yaw, pitch) in enumerate(tqdm(VIEWS, desc="Processing")):
         
-        # Create subfolder in output
-        save_folder = os.path.join(OUTPUT_DIR, name_no_ext)
-        if not os.path.exists(save_folder):
-            os.makedirs(save_folder)
+        # Core Mapping Logic
+        lon, lat = get_perspective_map(FOV, yaw, pitch, OUTPUT_SIZE[0], OUTPUT_SIZE[1])
 
-        print(f"\nProcessing: {filename} -> {save_folder}")
-        
-        img = cv2.imread(file_path)
-        if img is None:
-            print(f"Error reading {file_path}, skipping.")
-            continue
+        # Map lon/lat to image u,v
+        u = (lon / (2 * np.pi) + 0.5) * w_pano
+        v = (-lat / np.pi + 0.5) * h_pano 
 
-        h_pano, w_pano = img.shape[:2]
+        map_x = u.astype(np.float32)
+        map_y = v.astype(np.float32)
 
-        for idx, (yaw, pitch) in enumerate(tqdm(VIEWS, desc="Generating Views")):
-            
-            lon, lat = get_perspective_map(FOV, yaw, pitch, OUTPUT_SIZE[0], OUTPUT_SIZE[1])
+        # Remap
+        rect_img = cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_WRAP)
 
-            # Map lon/lat to image u,v
-            u = (lon / (2 * np.pi) + 0.5) * w_pano
-            v = (-lat / np.pi + 0.5) * h_pano 
+        # Save
+        save_name = f"{idx:02d}_yaw{yaw}_pitch{pitch}.jpg"
+        cv2.imwrite(os.path.join(output_folder, save_name), rect_img)
 
-            map_x = u.astype(np.float32)
-            map_y = v.astype(np.float32)
+    print(f"\n[Success] Processed images saved to: {output_folder}")
 
-            rect_img = cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_WRAP)
+# ==========================================
+# 3. MAIN FUNCTION
+# ==========================================
+def main():
+    # --- USER CONFIGURATION ---
+    target_image_name = "corridor2.jpg"
+    
+    # --- DIRECTORY SETUP ---
+    # Matches LGT-Net logic: navigate relative to the script file
+    current_script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_script_dir) # Go up from 'src' to project root
 
-            save_name = f"{idx:02d}_yaw{yaw}_pitch{pitch}.jpg"
-            cv2.imwrite(os.path.join(save_folder, save_name), rect_img)
+    # Input: .../data/pano/input
+    input_dir = os.path.join(project_root, "data", "pano", "input")
+    input_image_path = os.path.join(input_dir, target_image_name)
+    
+    # Output: .../data/pano/virtual_camera_processed/{image_name}
+    base_output_dir = os.path.join(project_root, "data", "pano", "virtual_camera_processed")
+    image_stem = os.path.splitext(target_image_name)[0]
+    output_folder = os.path.join(base_output_dir, image_stem)
 
-    print("\n--- Processing Complete! ---")
+    # --- VALIDATION & SETUP ---
+    if not os.path.exists(input_image_path):
+        print(f"[Error] Input file not found: {input_image_path}")
+        return
+
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+        print(f"Created output directory: {output_folder}")
+    else:
+        print(f"Output directory exists: {output_folder}")
+
+    print(f"Processing: {input_image_path}")
+    print(f"Output to:  {output_folder}")
+
+    # --- EXECUTE PROCESSING ---
+    process_panorama_views(input_image_path, output_folder)
 
 if __name__ == "__main__":
-    process_panoramas()
+    main()
