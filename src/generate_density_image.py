@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import open3d as o3d
 import cv2
+import json
 from pathlib import Path
 
 # -------------------------------------------------------------------------
@@ -131,14 +132,22 @@ def generate_density(point_cloud, width=256, height=256):
     if np.max(density) > 0:
         density = density / np.max(density)
 
-    return density
+    metadata = {
+        "min_coords": min_coords.tolist(),
+        "max_dim": float(max_dim),
+        "offset": offset.tolist(),
+        "image_width": int(width),
+        "image_height": int(height),
+    }
+
+    return density, metadata
 
 # -------------------------------------------------------------------------
 # 4. MAIN EXECUTION
 # -------------------------------------------------------------------------
 def main():
     # --- CONFIGURATION ---
-    FILENAME = "lab_new_cleaned_no_roof.ply"
+    FILENAME = "Area_3_selected_rooms.ply"
     # ---------------------
 
     input_path = input_dir / FILENAME
@@ -169,16 +178,22 @@ def main():
     
     # 4. Generate Density Image
     print("  > Generating proportional density map...")
-    density_map = generate_density(unique_coords)
+    density_map, metadata = generate_density(unique_coords)
     
     density_img_vis = (density_map * 255).astype(np.uint8)
     
-    # 5. Save (Filename matches input name exactly)
-    out_name = input_path.stem + ".png"
-    save_path = output_dir / out_name
-    
-    cv2.imwrite(str(save_path), density_img_vis)
-    print(f"Done! Saved to: {save_path.name}")
+    # 5. Save into a per-pointcloud folder
+    out_folder = output_dir / input_path.stem
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    image_path = out_folder / "density.png"
+    metadata_path = out_folder / "metadata.json"
+
+    cv2.imwrite(str(image_path), density_img_vis)
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"Done! Saved to: {out_folder}")
 
 if __name__ == "__main__":
     main()

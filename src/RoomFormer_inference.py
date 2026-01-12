@@ -4,6 +4,7 @@ import sys
 import torch
 import numpy as np
 import cv2
+import json
 from PIL import Image
 from pathlib import Path
 
@@ -163,7 +164,7 @@ def draw_results(img_rgb, outputs, threshold=0.5):
     # Note: img_rgb is already 0-255 uint8. 
     room_map_img = np.clip(pred_room_map + img_rgb, 0, 255).astype(np.uint8)
 
-    return room_map_img, floorplan_img
+    return room_map_img, floorplan_img, room_polys
 
 # -------------------------------------------------------------------------
 # 4. MAIN
@@ -173,7 +174,7 @@ def main():
     device = torch.device(args.device)
 
     # Hard-coded single image inference (edit this filename as needed)
-    target_image_name = "Area_3_4_rooms.png"
+    target_image_name = "Area_3_selected_rooms.png"
     
     print(f"--- RoomFormer Inference ---")
     print(f"Input:  {args.input_dir}")
@@ -195,14 +196,21 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    img_path = input_dir / target_image_name
+    base_name = Path(target_image_name).stem
+
+    # New layout: data/density_image/<base_name>/<base_name>.png
+    img_path = input_dir / base_name / target_image_name
     if not img_path.exists():
-        print(f"Error: Target image not found: {img_path}")
-        return
+        # Backward-compatible fallback (old layout): data/density_image/<base_name>.png
+        fallback_path = input_dir / target_image_name
+        if fallback_path.exists():
+            print(f"Warning: Using legacy input path: {fallback_path}")
+            img_path = fallback_path
+        else:
+            print(f"Error: Target image not found: {img_path}")
+            return
 
     print(f"Processing 1 image: {img_path.name}")
-
-    base_name = img_path.stem
 
     img_tensor, (h, w), img_vis = preprocess_image(img_path)
     img_tensor = img_tensor.unsqueeze(0).to(device)
@@ -210,16 +218,22 @@ def main():
     with torch.no_grad():
         outputs = model(img_tensor)
 
-    room_map_img, floorplan_img = draw_results(img_vis, outputs, threshold=args.prob_threshold)
+    room_map_img, floorplan_img, room_polys = draw_results(
+        img_vis, outputs, threshold=args.prob_threshold
+    )
 
     per_image_output_dir = output_dir / base_name
     per_image_output_dir.mkdir(parents=True, exist_ok=True)
 
     path_room_map = per_image_output_dir / f"{base_name}_pred_room_map.png"
     path_floorplan = per_image_output_dir / f"{base_name}_pred_floorplan.png"
+    path_predictions = per_image_output_dir / "predictions.json"
 
     cv2.imwrite(str(path_room_map), cv2.cvtColor(room_map_img, cv2.COLOR_RGB2BGR))
     cv2.imwrite(str(path_floorplan), cv2.cvtColor(floorplan_img, cv2.COLOR_RGB2BGR))
+
+    with open(path_predictions, "w", encoding="utf-8") as f:
+        json.dump([poly.tolist() for poly in room_polys], f, indent=2)
 
     print(f"Saved: {base_name}")
 

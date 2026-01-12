@@ -52,7 +52,7 @@ def preprocess_manhattan(img, vp_cache_path=None):
             vp = [[float(v) for v in line.rstrip().split(' ')] for line in f.readlines()]
             vp = np.array(vp)
     else:
-        print("Detecting Vanishing Point (this may take a moment)...") # <--- Optional: Add this too
+        print("Detecting Vanishing Point...") 
         # qError=0.7, refineIter=3 are defaults from LGT-Net
         _, vp, _, _, _, _, _ = panoEdgeDetection(img, qError=0.7, refineIter=3)
     
@@ -195,11 +195,11 @@ def save_simple_layout_json(output_folder, name, output_xyz, camera_height=1.6):
 # ==========================================
 def main():
     # --- USER CONFIGURATION ---
-    target_image_name = "corridor2.jpg" 
+    target_image_name = "Area3_study.jpg" 
     
     # --- DIRECTORY SETUP ---
     base_data_dir = os.path.abspath(os.path.join(current_script_dir, "..", "data", "pano"))
-    input_dir = os.path.join(base_data_dir, "input")
+    input_dir = os.path.join(base_data_dir, "raw")
     input_image_path = os.path.join(input_dir, target_image_name)
     
     if not os.path.exists(input_image_path):
@@ -207,7 +207,7 @@ def main():
         return
 
     image_stem = os.path.splitext(target_image_name)[0]
-    output_dir = os.path.join(base_data_dir, "output", image_stem)
+    output_dir = os.path.join(base_data_dir, "LGT_Net_processed", image_stem)
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Processing: {input_image_path}")

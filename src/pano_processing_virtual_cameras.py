@@ -135,8 +135,8 @@ def main():
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_script_dir) # Go up from 'src' to project root
 
-    # Input: .../data/pano/input
-    input_dir = os.path.join(project_root, "data", "pano", "input")
+    # Input: .../data/pano/raw
+    input_dir = os.path.join(project_root, "data", "pano", "raw")
     input_image_path = os.path.join(input_dir, target_image_name)
     
     # Output: .../data/pano/virtual_camera_processed/{image_name}
