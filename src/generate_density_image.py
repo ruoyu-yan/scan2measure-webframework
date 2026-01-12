@@ -12,8 +12,8 @@ from pathlib import Path
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent  # .../scan2measure-webframework
 
-# Input Directory: .../data/point_cloud
-input_dir = project_root / "data" / "point_cloud"
+# Input Directory: .../data/raw_point_cloud
+input_dir = project_root / "data" / "raw_point_cloud"
 
 # Output Directory: .../data/density_image
 output_dir = project_root / "data" / "density_image"
@@ -147,7 +147,7 @@ def generate_density(point_cloud, width=256, height=256):
 # -------------------------------------------------------------------------
 def main():
     # --- CONFIGURATION ---
-    FILENAME = "Area_3_selected_rooms.ply"
+    FILENAME = "Area_3_selected_rooms_no_RGB.ply"
     # ---------------------
 
     input_path = input_dir / FILENAME
@@ -171,10 +171,15 @@ def main():
     extents = np.max(points, axis=0) - np.min(points, axis=0)
     if np.max(extents) < 500: points *= 1000.0
 
+    # Initialize unique_coords with raw points (Default)
+    unique_coords = points 
+
+    # --- QUANTIZATION (Comment out to disable) ---
     print("  > Applying quantization...")
     points[:,:2] = np.round(points[:,:2] / 10) * 10.
     points[:,2] = np.round(points[:,2] / 100) * 100.
     unique_coords = np.unique(points, axis=0)
+    # ---------------------------------------------
     
     # 4. Generate Density Image
     print("  > Generating proportional density map...")
@@ -186,7 +191,7 @@ def main():
     out_folder = output_dir / input_path.stem
     out_folder.mkdir(parents=True, exist_ok=True)
 
-    image_path = out_folder / "density.png"
+    image_path = out_folder / (input_path.stem + ".png")
     metadata_path = out_folder / "metadata.json"
 
     cv2.imwrite(str(image_path), density_img_vis)
