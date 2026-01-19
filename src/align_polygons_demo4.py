@@ -453,5 +453,56 @@ def main():
 
     plt.show()
 
+    # --- Data Persistence: Save alignment results for downstream coloring tasks ---
+    alignment_results = []
+    for m in matches:
+        room_name = m["name"]
+        # Find the original LGT polygon for this room
+        lgt_poly = None
+        for room in lgt_rooms:
+            if room["name"] == room_name:
+                lgt_poly = room["poly"]
+                break
+        
+        # Calculate global camera pose
+        # LGT-Net camera originates at (0, 0) in its local frame
+        local_camera = np.array([0.0, 0.0])
+        
+        # Get the centroid of the LGT polygon's bounding box
+        lgt_bbox_center = bounding_box_center(lgt_poly)
+        
+        # Apply transformation: subtract centroid, scale, rotate, then translate
+        centered_camera = local_camera - lgt_bbox_center
+        scaled_camera = centered_camera * m["scale"]
+        R = _rotation_matrix(m["angle"])
+        rotated_camera = R @ scaled_camera
+        camera_pose_global = rotated_camera + m["trans"]
+        
+        alignment_results.append({
+            "room_name": room_name,
+            "rf_idx": m["rf_idx"],
+            "error": m["error"],
+            "camera_pose_global": camera_pose_global.tolist(),
+            "transformation": {
+                "rotation_deg": m["angle"],
+                "scale": m["scale"],
+                "translation": m["trans"].tolist()
+            }
+        })
+    
+    output_data = {
+        "metadata": {
+            "best_scale": best_scale
+        },
+        "alignment_results": alignment_results
+    }
+    
+    # Save to the same directory as the RoomFormer predictions.json
+    output_path = rf_path.parent / "global_alignment.json"
+    with open(output_path, 'w') as f:
+        json.dump(output_data, f, indent=4)
+    
+    print(f"\nAlignment results saved to: {output_path}")
+
 if __name__ == "__main__":
     main()
