@@ -17,6 +17,19 @@ FOV = 60  # Degrees
 FOCAL_LENGTH = 0.5 * IMG_W / np.tan(0.5 * np.radians(FOV))
 CX, CY = (IMG_W - 1) / 2.0, (IMG_H - 1) / 2.0
 
+# Views to render: (yaw_offset, pitch_offset) in degrees
+# 8 standard horizontal views at 45-degree intervals
+VIEWS_TO_RENDER = [
+    (0, 0),    # Front
+    (45, 0),   # Front-Right
+    (90, 0),   # Right
+    (135, 0),  # Back-Right
+    (180, 0),  # Back
+    (225, 0),  # Back-Left
+    (270, 0),  # Left
+    (315, 0),  # Front-Left
+]
+
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
@@ -63,7 +76,36 @@ def find_floor_z(points, bin_size=0.05):
     floor_z = edges[peak_idx] + (bin_size / 2.0)
     return floor_z
 
-def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0):
+def filter_short_edges(binary_image, min_size):
+    """
+    Removes small connected components from a binary edge image.
+    
+    Args:
+        binary_image: Input binary image (white edges on black background)
+        min_size: Minimum area (in pixels) for a component to be retained
+    
+    Returns:
+        Filtered binary image with small components removed
+    """
+    # Find all connected components with statistics
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        binary_image, connectivity=8
+    )
+    
+    # Create output image (start with black)
+    output = np.zeros_like(binary_image)
+    
+    # Iterate through components (skip label 0 which is background)
+    for label_id in range(1, num_labels):
+        area = stats[label_id, cv2.CC_STAT_AREA]
+        
+        # Keep only components with area >= min_size
+        if area >= min_size:
+            output[labels == label_id] = 255
+    
+    return output
+
+def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0):
     """
     Renders a synthetic depth-based wireframe from the point cloud.
     
@@ -72,26 +114,27 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
         camera_pose_global: [x, y, z] in meters
         rotation_deg: Global alignment rotation (Room orientation)
         view_yaw: Relative yaw of the virtual camera (0 = Front, 90 = Right, etc.)
+        view_pitch: Relative pitch of the virtual camera (positive = look up, negative = look down)
     """
-    print(f"  > Rendering View (Yaw={view_yaw} deg)...")
+    print(f"  > Rendering View (Yaw={view_yaw} deg, Pitch={view_pitch} deg)...")
     
     # 1. Translate Points to Camera Center
     # Vector from Camera -> Point
     vecs = points - camera_pose_global
     
     # 2. Rotate Points to Align with Camera Orientation
-    # We need to undo the Global Rotation AND apply the specific View Rotation.
-    # Total rotation to "un-rotate" the world to the camera's front:
-    # We essentially rotate the world by -(Global_Yaw + View_Yaw)
+    # Rotation order: Global Yaw -> View Yaw -> View Pitch
+    # We rotate the world by the negative of these angles to bring it into camera frame
     
+    # Step 2a: Apply Yaw rotation (around Z-axis)
     total_yaw_rad = np.radians(-(rotation_deg + view_yaw))
-    c, s = np.cos(total_yaw_rad), np.sin(total_yaw_rad)
+    c_yaw, s_yaw = np.cos(total_yaw_rad), np.sin(total_yaw_rad)
     
-    # Rotation Matrix (around Z-axis)
+    # Rotation Matrix (around Z-axis for Yaw)
     R_z = np.array([
-        [c, -s, 0],
-        [s,  c, 0],
-        [0,  0, 1]
+        [c_yaw, -s_yaw, 0],
+        [s_yaw,  c_yaw, 0],
+        [0,      0,     1]
     ])
     
     local_vecs = vecs @ R_z.T
@@ -110,13 +153,28 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
     points_cam[:, 1] = -local_vecs[:, 2] # Z -> -Y
     points_cam[:, 2] = local_vecs[:, 1]  # Y -> Z (Forward)
     
+    # Step 2b: Apply Pitch rotation (around Camera's X-axis) AFTER swizzle
+    # Pitch rotates around X-axis in camera frame
+    pitch_rad = np.radians(-view_pitch)  # Negative because we rotate the world
+    c_pitch, s_pitch = np.cos(pitch_rad), np.sin(pitch_rad)
+    
+    # Rotation Matrix (around X-axis for Pitch)
+    R_x = np.array([
+        [1,       0,        0],
+        [0, c_pitch, -s_pitch],
+        [0, s_pitch,  c_pitch]
+    ])
+    
+    points_cam = points_cam @ R_x.T
+    
     # 4. Filter Points Behind Camera (Z > near_clip)
     mask = points_cam[:, 2] > 0.1
     points_cam = points_cam[mask]
     
     if len(points_cam) == 0:
         print("    [Warning] No points visible in this view!")
-        return np.zeros((IMG_H, IMG_W), dtype=np.uint8), np.zeros((IMG_H, IMG_W), dtype=np.uint8)
+        empty = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
+        return empty, empty, empty, empty, empty, empty
 
     # 5. Project to 2D (u, v)
     u = (points_cam[:, 0] * FOCAL_LENGTH / points_cam[:, 2]) + CX
@@ -156,11 +214,62 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
     # Map range [0.1m, 10m] to [0, 255]
     depth_vis = cv2.normalize(depth_filled, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
     
-    # 9. Edge Detection (The Wireframe)
-    # Use Canny to find depth discontinuities
-    edges = cv2.Canny(depth_vis, 50, 150)
+    # 9. Channel A Denoising: Bilateral Filter
+    # Smooth planar noise while preserving depth discontinuities
+    depth_denoised = cv2.bilateralFilter(depth_vis, d=20, sigmaColor=100, sigmaSpace=75)
     
-    return edges, depth_vis
+    # 10. Channel A Edge Detection (The Wireframe)
+    # Use Canny to find depth discontinuities
+    edges = cv2.Canny(depth_denoised, 50, 150)
+    
+    # 11. Channel B: Crease Edge Extraction via Surface Normals
+    # Compute gradients in X and Y directions using Sobel
+    grad_x = cv2.Sobel(depth_denoised, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(depth_denoised, cv2.CV_64F, 0, 1, ksize=3)
+    
+    # Compute surface normal components from depth gradients
+    # For a depth map Z(x,y), surface normal N = (-dZ/dx, -dZ/dy, 1) normalized
+    # We use a scale factor to balance the Z component
+    z_scale = 1.0  # Adjustable: higher = flatter normals, lower = steeper
+    
+    # Compute normal components
+    nx = -grad_x
+    ny = -grad_y
+    nz = np.ones_like(grad_x) * z_scale * 255  # Scale to match gradient magnitude
+    
+    # Normalize the normal vectors
+    magnitude = np.sqrt(nx**2 + ny**2 + nz**2) + 1e-8  # Avoid division by zero
+    nx_norm = nx / magnitude
+    ny_norm = ny / magnitude
+    nz_norm = nz / magnitude
+    
+    # Create a visual normal map (RGB: X, Y, Z mapped to 0-255)
+    # Standard normal map encoding: (N + 1) / 2 * 255
+    normal_map = np.zeros((IMG_H, IMG_W, 3), dtype=np.uint8)
+    normal_map[:, :, 0] = ((nx_norm + 1) / 2 * 255).astype(np.uint8)  # R = X
+    normal_map[:, :, 1] = ((ny_norm + 1) / 2 * 255).astype(np.uint8)  # G = Y
+    normal_map[:, :, 2] = ((nz_norm + 1) / 2 * 255).astype(np.uint8)  # B = Z
+    
+    # Convert normal map to grayscale for edge detection
+    # Use orientation angle (atan2 of X and Y components) to detect orientation changes
+    normal_angle = np.arctan2(ny_norm, nx_norm)  # Range: [-pi, pi]
+    normal_angle_vis = cv2.normalize(normal_angle, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+    
+    # Run Canny on the normal angle map to detect orientation discontinuities
+    # These correspond to geometric creases like wall-ceiling seams
+    normal_edges = cv2.Canny(normal_angle_vis, 50, 150)
+    
+    # 12. Geometric Filtering: Remove short/noisy edge segments from both channels
+    # Filter Channel A (depth edges) with min_size of 60 pixels
+    edges_filtered = filter_short_edges(edges, min_size=60)
+    
+    # Filter Channel B (normal edges) with min_size of 60 pixels
+    normal_edges_filtered = filter_short_edges(normal_edges, min_size=60)
+    
+    # 13. Combined Wireframe: Bitwise OR of filtered Channel A and Channel B
+    combined_wireframe = cv2.bitwise_or(edges_filtered, normal_edges_filtered)
+    
+    return edges, depth_vis, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe
 
 # ==========================================
 # 3. MAIN
@@ -169,13 +278,25 @@ def main():
     print("--- Testing Synthetic Point Cloud Renderer ---")
     
     # 1. Paths
-    pcd_path = project_root / "data" / "raw_point_cloud" / "Area_3_study_no_RGB.ply"
-    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "Area_3_study_no_RGB" / "global_alignment.json"
+    pcd_path = project_root / "data" / "raw_point_cloud" / "lab_new_cleaned_no_roof.ply"
+    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "lab_new_cleaned_no_roof" / "global_alignment.json"
     # Assuming metadata is here based on generate_density_image structure
-    meta_path = project_root / "data" / "density_image" / "Area_3_study_no_RGB" / "metadata.json"
+    meta_path = project_root / "data" / "density_image" / "lab_new_cleaned_no_roof" / "metadata.json"
     
-    output_dir = project_root / "data" / "debug_renderer"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    target_room = "Setup13"
+
+    # Extract point cloud name from pcd_path stem for output directory structure
+    point_cloud_name = pcd_path.stem
+    output_dir_a = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_A"
+    output_dir_a_filtered = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_A_Filtered"
+    output_dir_b = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_B"
+    output_dir_b_filtered = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_B_Filtered"
+    output_dir_combined = project_root / "data" / "debug_renderer" / point_cloud_name / "Combined"
+    output_dir_a.mkdir(parents=True, exist_ok=True)
+    output_dir_a_filtered.mkdir(parents=True, exist_ok=True)
+    output_dir_b.mkdir(parents=True, exist_ok=True)
+    output_dir_b_filtered.mkdir(parents=True, exist_ok=True)
+    output_dir_combined.mkdir(parents=True, exist_ok=True)
 
     # 2. Load Data
     print(f"Loading Point Cloud: {pcd_path.name}")
@@ -191,7 +312,7 @@ def main():
     with open(json_path) as f: align = json.load(f)
     
     # Extract Room Info
-    target_room = "Area3_study"
+    
     room_info = next(r for r in align['alignment_results'] if r['room_name'] == target_room)
     
     # 3. Construct Metric Pose
@@ -248,21 +369,46 @@ def main():
     print(f"\nComputed Camera Pose: {final_pose}")
     print(f"Room Orientation: {yaw_deg} deg")
 
-    # 4. Render!
-    # Let's render the Front view (yaw=0 relative to camera)
-    print("\nRendering Synthetic Views...")
-    edges, depth_map = render_synthetic_wireframe(points, final_pose, yaw_deg, view_yaw=0)
+    # 4. Render all views!
+    print(f"\nRendering {len(VIEWS_TO_RENDER)} Synthetic Views...")
     
-    # 5. Save Results
-    edge_path = output_dir / "synthetic_wireframe_front.png"
-    depth_path = output_dir / "synthetic_depth_front.png"
+    for view_yaw, view_pitch in VIEWS_TO_RENDER:
+        edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe = render_synthetic_wireframe(
+            points, final_pose, yaw_deg, 
+            view_yaw=view_yaw, view_pitch=view_pitch
+        )
+        
+        # Save Channel A outputs (depth-based wireframe)
+        edge_path = output_dir_a / f"synthetic_wireframe_yaw{view_yaw}_pitch{view_pitch}.png"
+        depth_path = output_dir_a / f"synthetic_depth_yaw{view_yaw}_pitch{view_pitch}.png"
+        
+        cv2.imwrite(str(edge_path), edges)
+        cv2.imwrite(str(depth_path), depth_map)
+        
+        # Save Channel A Filtered outputs (short edges removed)
+        edge_filtered_path = output_dir_a_filtered / f"synthetic_wireframe_filtered_yaw{view_yaw}_pitch{view_pitch}.png"
+        cv2.imwrite(str(edge_filtered_path), edges_filtered)
+        
+        # Save Channel B outputs (normal-based crease edges)
+        normal_edge_path = output_dir_b / f"synthetic_normal_edges_yaw{view_yaw}_pitch{view_pitch}.png"
+        cv2.imwrite(str(normal_edge_path), normal_edges)
+        
+        # Save Channel B Filtered outputs (short edges removed)
+        normal_edge_filtered_path = output_dir_b_filtered / f"synthetic_normal_edges_filtered_yaw{view_yaw}_pitch{view_pitch}.png"
+        cv2.imwrite(str(normal_edge_filtered_path), normal_edges_filtered)
+        
+        # Save Combined wireframe (filtered A | filtered B)
+        combined_path = output_dir_combined / f"synthetic_combined_yaw{view_yaw}_pitch{view_pitch}.png"
+        cv2.imwrite(str(combined_path), combined_wireframe)
+        
+        print(f"    Saved: {edge_path.name}, {edge_filtered_path.name}, {normal_edge_path.name}, {normal_edge_filtered_path.name}, {combined_path.name}")
     
-    cv2.imwrite(str(edge_path), edges)
-    cv2.imwrite(str(depth_path), depth_map)
-    
-    print(f"\n[Success] Output saved to {output_dir}")
-    print(f"  - {edge_path.name}")
-    print(f"  - {depth_path.name}")
+    print(f"\n[Success] All {len(VIEWS_TO_RENDER)} views saved to:")
+    print(f"  Channel A: {output_dir_a}")
+    print(f"  Channel A Filtered: {output_dir_a_filtered}")
+    print(f"  Channel B: {output_dir_b}")
+    print(f"  Channel B Filtered: {output_dir_b_filtered}")
+    print(f"  Combined: {output_dir_combined}")
 
 if __name__ == "__main__":
     main()
