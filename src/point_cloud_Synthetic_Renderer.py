@@ -34,33 +34,6 @@ VIEWS_TO_RENDER = [
 # 2. HELPER FUNCTIONS
 # ==========================================
 
-def pixels_to_world(pixel_coords, metadata):
-    """Converts Density Image Pixels to World Meters."""
-    u, v = pixel_coords
-    min_coords = np.array(metadata['min_coords'])
-    offset = np.array(metadata['offset'])
-    max_dim = metadata['max_dim']
-    width = metadata['image_width']
-    
-    # Debug prints for coordinate transform
-    print(f"\n[DEBUG] pixels_to_world():")
-    print(f"  Input pixel_coords: u={u}, v={v}")
-    print(f"  metadata['min_coords']: {metadata['min_coords']}")
-    print(f"  metadata['max_dim']: {metadata['max_dim']}")
-    print(f"  metadata['image_width']: {metadata['image_width']}")
-    print(f"  metadata['offset']: {metadata['offset']}")
-    
-    scale_factor = width - 1
-    print(f"  Calculated scale_factor (width-1): {scale_factor}")
-    
-    world_x = (u / scale_factor * max_dim) - offset[0] + min_coords[0]
-    world_y = (v / scale_factor * max_dim) - offset[1] + min_coords[1]
-    
-    print(f"  Calculated world_x: {world_x}")
-    print(f"  Calculated world_y: {world_y}")
-    
-    return np.array([world_x, world_y])
-
 def find_floor_z(points, bin_size=0.05):
     """Finds the floor Z-level using histogram analysis."""
     z_values = points[:, 2]
@@ -105,7 +78,156 @@ def filter_short_edges(binary_image, min_size):
     
     return output
 
-def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0):
+
+def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n=3, num_iterations=1000, min_inliers=500, parallel_threshold=0.9):
+    """
+    Extracts a 3D wireframe by finding plane intersections using RANSAC.
+    
+    Args:
+        points: (N, 3) numpy array of point cloud
+        num_planes: Number of dominant planes to detect (e.g., 6 for walls/floor/ceiling)
+        distance_threshold: RANSAC distance threshold for inlier classification
+        ransac_n: Number of points to sample for RANSAC
+        num_iterations: Number of RANSAC iterations
+        min_inliers: Minimum number of inliers for a valid plane
+        parallel_threshold: Dot product threshold to consider planes parallel (skip intersection)
+    
+    Returns:
+        List of 3D line segments as tuples: [(start_point, end_point), ...]
+        Each point is a numpy array of shape (3,)
+    """
+    print(f"\n[Wireframe Extraction] Starting RANSAC plane segmentation...")
+    
+    # Create Open3D point cloud for segmentation
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # Store detected planes: list of (plane_eq, inlier_points)
+    # plane_eq = [a, b, c, d] where ax + by + cz + d = 0
+    detected_planes = []
+    remaining_pcd = pcd
+    
+    for i in range(num_planes):
+        if len(remaining_pcd.points) < min_inliers:
+            print(f"  [Info] Stopping early: only {len(remaining_pcd.points)} points remaining")
+            break
+        
+        # RANSAC plane segmentation
+        plane_model, inlier_indices = remaining_pcd.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=ransac_n,
+            num_iterations=num_iterations
+        )
+        
+        if len(inlier_indices) < min_inliers:
+            print(f"  [Info] Plane {i+1}: Only {len(inlier_indices)} inliers, skipping")
+            break
+        
+        # Extract inlier points
+        inlier_pcd = remaining_pcd.select_by_index(inlier_indices)
+        inlier_points = np.asarray(inlier_pcd.points)
+        
+        # Store plane equation and inliers
+        detected_planes.append((np.array(plane_model), inlier_points))
+        
+        # Get normal vector for display
+        normal = plane_model[:3]
+        print(f"  Plane {i+1}: {len(inlier_indices)} inliers, Normal: [{normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f}]")
+        
+        # Remove inliers from remaining cloud
+        remaining_pcd = remaining_pcd.select_by_index(inlier_indices, invert=True)
+    
+    print(f"  Detected {len(detected_planes)} planes")
+    
+    # Find plane-plane intersections
+    wireframe_segments = []
+    
+    print(f"\n[Wireframe Extraction] Computing plane intersections...")
+    
+    for i in range(len(detected_planes)):
+        for j in range(i + 1, len(detected_planes)):
+            plane1_eq, plane1_pts = detected_planes[i]
+            plane2_eq, plane2_pts = detected_planes[j]
+            
+            # Get normal vectors
+            n1 = plane1_eq[:3]
+            n2 = plane2_eq[:3]
+            
+            # Check if planes are parallel
+            dot_product = abs(np.dot(n1, n2))
+            if dot_product > parallel_threshold:
+                # Planes are nearly parallel, skip
+                continue
+            
+            # Compute intersection line direction (cross product of normals)
+            line_dir = np.cross(n1, n2)
+            line_dir = line_dir / (np.linalg.norm(line_dir) + 1e-8)  # Normalize
+            
+            # Find a point on the intersection line
+            # Solve the system: n1 · p = -d1, n2 · p = -d2
+            # We fix one coordinate and solve for the other two
+            d1, d2 = plane1_eq[3], plane2_eq[3]
+            
+            # Find which axis to fix (use the one with smallest line_dir component)
+            fix_axis = np.argmin(np.abs(line_dir))
+            
+            # Build 2x2 system for the other two axes
+            axes = [k for k in range(3) if k != fix_axis]
+            A = np.array([[n1[axes[0]], n1[axes[1]]],
+                          [n2[axes[0]], n2[axes[1]]]])
+            b = np.array([-d1 - n1[fix_axis] * 0, -d2 - n2[fix_axis] * 0])  # Assuming fixed axis = 0
+            
+            # Check if system is solvable
+            if abs(np.linalg.det(A)) < 1e-8:
+                continue
+            
+            solution = np.linalg.solve(A, b)
+            
+            # Construct point on line
+            point_on_line = np.zeros(3)
+            point_on_line[fix_axis] = 0
+            point_on_line[axes[0]] = solution[0]
+            point_on_line[axes[1]] = solution[1]
+            
+            # Project inlier points from both planes onto the intersection line
+            # to find the parameter intervals covered by each plane
+            def project_to_line(points, line_point, line_direction):
+                """Project points onto a line and return parameter values."""
+                vecs = points - line_point
+                t_values = np.dot(vecs, line_direction)
+                return t_values
+            
+            t1_values = project_to_line(plane1_pts, point_on_line, line_dir)
+            t2_values = project_to_line(plane2_pts, point_on_line, line_dir)
+            
+            # Find intervals
+            t1_min, t1_max = np.min(t1_values), np.max(t1_values)
+            t2_min, t2_max = np.min(t2_values), np.max(t2_values)
+            
+            # Find intersection of intervals
+            t_overlap_min = max(t1_min, t2_min)
+            t_overlap_max = min(t1_max, t2_max)
+            
+            # Check if there's a valid overlap
+            if t_overlap_max <= t_overlap_min:
+                continue
+            
+            # Skip very short segments (noise)
+            segment_length = t_overlap_max - t_overlap_min
+            if segment_length < 0.1:  # Minimum 10cm segment
+                continue
+            
+            # Generate 3D line segment endpoints
+            start_point = point_on_line + t_overlap_min * line_dir
+            end_point = point_on_line + t_overlap_max * line_dir
+            
+            wireframe_segments.append((start_point, end_point))
+    
+    print(f"  Found {len(wireframe_segments)} wireframe segments")
+    
+    return wireframe_segments
+
+def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0, wireframe_segments=None):
     """
     Renders a synthetic depth-based wireframe from the point cloud.
     
@@ -115,6 +237,7 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
         rotation_deg: Global alignment rotation (Room orientation)
         view_yaw: Relative yaw of the virtual camera (0 = Front, 90 = Right, etc.)
         view_pitch: Relative pitch of the virtual camera (positive = look up, negative = look down)
+        wireframe_segments: List of 3D line segments for Channel B (from extract_3d_wireframe)
     """
     print(f"  > Rendering View (Yaw={view_yaw} deg, Pitch={view_pitch} deg)...")
     
@@ -222,42 +345,102 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
     # Use Canny to find depth discontinuities
     edges = cv2.Canny(depth_denoised, 50, 150)
     
-    # 11. Channel B: Crease Edge Extraction via Surface Normals
-    # Compute gradients in X and Y directions using Sobel
-    grad_x = cv2.Sobel(depth_denoised, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(depth_denoised, cv2.CV_64F, 0, 1, ksize=3)
+    # 11. Channel B: Geometry-based Wireframe via Plane Intersection
+    # Project 3D wireframe segments onto the 2D image plane
+    normal_edges = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
     
-    # Compute surface normal components from depth gradients
-    # For a depth map Z(x,y), surface normal N = (-dZ/dx, -dZ/dy, 1) normalized
-    # We use a scale factor to balance the Z component
-    z_scale = 1.0  # Adjustable: higher = flatter normals, lower = steeper
-    
-    # Compute normal components
-    nx = -grad_x
-    ny = -grad_y
-    nz = np.ones_like(grad_x) * z_scale * 255  # Scale to match gradient magnitude
-    
-    # Normalize the normal vectors
-    magnitude = np.sqrt(nx**2 + ny**2 + nz**2) + 1e-8  # Avoid division by zero
-    nx_norm = nx / magnitude
-    ny_norm = ny / magnitude
-    nz_norm = nz / magnitude
-    
-    # Create a visual normal map (RGB: X, Y, Z mapped to 0-255)
-    # Standard normal map encoding: (N + 1) / 2 * 255
-    normal_map = np.zeros((IMG_H, IMG_W, 3), dtype=np.uint8)
-    normal_map[:, :, 0] = ((nx_norm + 1) / 2 * 255).astype(np.uint8)  # R = X
-    normal_map[:, :, 1] = ((ny_norm + 1) / 2 * 255).astype(np.uint8)  # G = Y
-    normal_map[:, :, 2] = ((nz_norm + 1) / 2 * 255).astype(np.uint8)  # B = Z
-    
-    # Convert normal map to grayscale for edge detection
-    # Use orientation angle (atan2 of X and Y components) to detect orientation changes
-    normal_angle = np.arctan2(ny_norm, nx_norm)  # Range: [-pi, pi]
-    normal_angle_vis = cv2.normalize(normal_angle, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-    
-    # Run Canny on the normal angle map to detect orientation discontinuities
-    # These correspond to geometric creases like wall-ceiling seams
-    normal_edges = cv2.Canny(normal_angle_vis, 50, 150)
+    if wireframe_segments is not None and len(wireframe_segments) > 0:
+        # Define transformation functions (same as point cloud transformation above)
+        def transform_point_to_camera(point_3d, cam_pose, total_yaw_rad, pitch_rad):
+            """Transform a 3D world point to camera coordinates."""
+            # Translate to camera center
+            vec = point_3d - cam_pose
+            
+            # Apply Yaw rotation (around Z-axis)
+            c_yaw, s_yaw = np.cos(total_yaw_rad), np.sin(total_yaw_rad)
+            R_z = np.array([
+                [c_yaw, -s_yaw, 0],
+                [s_yaw,  c_yaw, 0],
+                [0,      0,     1]
+            ])
+            local_vec = R_z @ vec
+            
+            # Swizzle coordinates to camera frame
+            # World X -> Cam X, World Y -> Cam Z, World Z -> Cam -Y
+            point_cam = np.array([
+                local_vec[0],   # X -> X
+                -local_vec[2],  # Z -> -Y
+                local_vec[1]    # Y -> Z (Forward)
+            ])
+            
+            # Apply Pitch rotation (around X-axis)
+            c_pitch, s_pitch = np.cos(pitch_rad), np.sin(pitch_rad)
+            R_x = np.array([
+                [1,       0,        0],
+                [0, c_pitch, -s_pitch],
+                [0, s_pitch,  c_pitch]
+            ])
+            point_cam = R_x @ point_cam
+            
+            return point_cam
+        
+        def project_to_2d(point_cam):
+            """Project a camera-space point to 2D image coordinates."""
+            if point_cam[2] <= 0.1:  # Behind camera
+                return None
+            u = (point_cam[0] * FOCAL_LENGTH / point_cam[2]) + CX
+            v = (point_cam[1] * FOCAL_LENGTH / point_cam[2]) + CY
+            return np.array([u, v])
+        
+        # Precompute rotation parameters
+        total_yaw_rad_seg = np.radians(-(rotation_deg + view_yaw))
+        pitch_rad_seg = np.radians(-view_pitch)
+        
+        # Process each wireframe segment
+        for start_3d, end_3d in wireframe_segments:
+            # Transform endpoints to camera space
+            start_cam = transform_point_to_camera(start_3d, camera_pose_global, total_yaw_rad_seg, pitch_rad_seg)
+            end_cam = transform_point_to_camera(end_3d, camera_pose_global, total_yaw_rad_seg, pitch_rad_seg)
+            
+            # Skip segments entirely behind camera
+            if start_cam[2] <= 0.1 and end_cam[2] <= 0.1:
+                continue
+            
+            # Clip segment to near plane if partially behind camera
+            near_clip = 0.1
+            if start_cam[2] <= near_clip or end_cam[2] <= near_clip:
+                # Parametric line: P(t) = start + t * (end - start), t in [0, 1]
+                # Find t where Z = near_clip
+                direction = end_cam - start_cam
+                if abs(direction[2]) > 1e-8:
+                    t_clip = (near_clip - start_cam[2]) / direction[2]
+                    clipped_point = start_cam + t_clip * direction
+                    
+                    if start_cam[2] <= near_clip:
+                        start_cam = clipped_point
+                    else:
+                        end_cam = clipped_point
+            
+            # Project to 2D
+            start_2d = project_to_2d(start_cam)
+            end_2d = project_to_2d(end_cam)
+            
+            if start_2d is None or end_2d is None:
+                continue
+            
+            # Check if line is within image bounds (at least partially)
+            # Use Cohen-Sutherland-like clipping logic
+            u1, v1 = int(np.clip(start_2d[0], 0, IMG_W - 1)), int(np.clip(start_2d[1], 0, IMG_H - 1))
+            u2, v2 = int(np.clip(end_2d[0], 0, IMG_W - 1)), int(np.clip(end_2d[1], 0, IMG_H - 1))
+            
+            # Skip lines completely outside the image
+            if (start_2d[0] < 0 and end_2d[0] < 0) or (start_2d[0] >= IMG_W and end_2d[0] >= IMG_W):
+                continue
+            if (start_2d[1] < 0 and end_2d[1] < 0) or (start_2d[1] >= IMG_H and end_2d[1] >= IMG_H):
+                continue
+            
+            # Draw the line segment
+            cv2.line(normal_edges, (u1, v1), (u2, v2), 255, thickness=1)
     
     # 12. Geometric Filtering: Remove short/noisy edge segments from both channels
     # Filter Channel A (depth edges) with min_size of 60 pixels
@@ -278,12 +461,12 @@ def main():
     print("--- Testing Synthetic Point Cloud Renderer ---")
     
     # 1. Paths
-    pcd_path = project_root / "data" / "raw_point_cloud" / "lab_new_cleaned_no_roof.ply"
-    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "lab_new_cleaned_no_roof" / "global_alignment.json"
+    pcd_path = project_root / "data" / "raw_point_cloud" / "Area_3_study_no_RGB.ply"
+    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "Area_3_study_no_RGB" / "global_alignment.json"
     # Assuming metadata is here based on generate_density_image structure
-    meta_path = project_root / "data" / "density_image" / "lab_new_cleaned_no_roof" / "metadata.json"
+    meta_path = project_root / "data" / "density_image" / "Area_3_study_no_RGB" / "metadata.json"
     
-    target_room = "Setup13"
+    target_room = "Area3_study"
 
     # Extract point cloud name from pcd_path stem for output directory structure
     point_cloud_name = pcd_path.stem
@@ -316,46 +499,36 @@ def main():
     room_info = next(r for r in align['alignment_results'] if r['room_name'] == target_room)
     
     # 3. Construct Metric Pose
-    # X, Y from Global Pixels -> Meters
-    pose_px = room_info['camera_pose_global']
-    pose_world_xy = pixels_to_world(pose_px, meta)
+    # Use relative position in density image to interpolate Point Cloud Bounds
+    # This bypasses global coordinate mismatches
     
-    # ==========================================
-    # Unit Scaling Check (mm vs m mismatch)
-    # ==========================================
+    pose_px = room_info['camera_pose_global']
+    img_width = meta['image_width']
+    
+    # Calculate relative position (0.0 to 1.0)
+    rel_u = pose_px[0] / img_width
+    rel_v = pose_px[1] / img_width  # Assuming square image
+    
+    # Get Point Cloud Bounds
     pcd_min = np.array(pcd.get_min_bound())
     pcd_max = np.array(pcd.get_max_bound())
-    pcd_centroid = (pcd_min + pcd_max) / 2.0
+    pcd_range = pcd_max - pcd_min
     
-    # Compare magnitude of pose_world_xy to point cloud centroid (XY only)
-    pose_magnitude = np.linalg.norm(pose_world_xy)
-    centroid_magnitude = np.linalg.norm(pcd_centroid[:2])  # XY only
+    # Interpolate Pose
+    # X: Min + rel_u * Range
+    cam_x = pcd_min[0] + rel_u * pcd_range[0]
     
-    print(f"\n[DEBUG] Unit Scaling Check:")
-    print(f"  pose_world_xy magnitude: {pose_magnitude:.2f}")
-    print(f"  pcd centroid XY magnitude: {centroid_magnitude:.2f}")
+    # Y: Max - rel_v * Range (Image V goes down, World Y goes up)
+    cam_y = pcd_max[1] - rel_v * pcd_range[1]
     
-    if centroid_magnitude > 0:
-        ratio = pose_magnitude / centroid_magnitude
-        print(f"  Ratio (pose/centroid): {ratio:.2f}")
-        
-        if ratio > 500:
-            print("  Unit mismatch detected (mm vs m). Scaling camera pose by 0.001.")
-            pose_world_xy = pose_world_xy / 1000.0
-            
-            # Check Y-axis orientation after scaling
-            # If pose Y is negative but cloud Y is positive, flip Y
-            if pose_world_xy[1] < 0 and pcd_min[1] > 0:
-                print("  Inverting Y-axis to match point cloud.")
-                pose_world_xy[1] = -pose_world_xy[1]
-            elif pose_world_xy[1] < pcd_min[1] or pose_world_xy[1] > pcd_max[1]:
-                # Y is out of bounds - try inverting
-                inverted_y = -pose_world_xy[1]
-                if pcd_min[1] <= inverted_y <= pcd_max[1]:
-                    print("  Inverting Y-axis to match point cloud (Y was out of bounds).")
-                    pose_world_xy[1] = inverted_y
+    pose_world_xy = np.array([cam_x, cam_y])
     
-    print(f"  Final pose_world_xy after corrections: {pose_world_xy}")
+    print(f"\n[DEBUG] Pose Calculation (Relative to PC Bounds):")
+    print(f"  Pixel: {pose_px}, Image Width: {img_width}")
+    print(f"  Relative: ({rel_u:.3f}, {rel_v:.3f})")
+    print(f"  PC Bounds X: [{pcd_min[0]:.3f}, {pcd_max[0]:.3f}]")
+    print(f"  PC Bounds Y: [{pcd_min[1]:.3f}, {pcd_max[1]:.3f}]")
+    print(f"  Calculated Pose: {pose_world_xy}")
     
     # Z from Floor Detection + 1.6m
     floor_z = find_floor_z(points)
@@ -368,14 +541,26 @@ def main():
     
     print(f"\nComputed Camera Pose: {final_pose}")
     print(f"Room Orientation: {yaw_deg} deg")
+    
+    # 4. Extract 3D Wireframe from Point Cloud (Plane Intersections)
+    wireframe_segments = extract_3d_wireframe(
+        points,
+        num_planes=6,
+        distance_threshold=0.05,
+        ransac_n=3,
+        num_iterations=1000,
+        min_inliers=500,
+        parallel_threshold=0.9
+    )
 
-    # 4. Render all views!
+    # 5. Render all views!
     print(f"\nRendering {len(VIEWS_TO_RENDER)} Synthetic Views...")
     
     for view_yaw, view_pitch in VIEWS_TO_RENDER:
         edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe = render_synthetic_wireframe(
             points, final_pose, yaw_deg, 
-            view_yaw=view_yaw, view_pitch=view_pitch
+            view_yaw=view_yaw, view_pitch=view_pitch,
+            wireframe_segments=wireframe_segments
         )
         
         # Save Channel A outputs (depth-based wireframe)
