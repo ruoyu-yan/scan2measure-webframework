@@ -10,20 +10,81 @@ from tqdm import tqdm
 OUTPUT_SIZE = (1024, 1024)  
 FOV = 60                    
 
-# The 14-Photo Layout Definition: (Yaw, Pitch) in degrees
-VIEWS = [
-    # --- Middle Ring (8 photos) ---
-    (0, 0), (45, 0), (90, 0), (135, 0), (180, 0), (225, 0), (270, 0), (315, 0),
+# ==========================================
+# 2. SPHERICAL TILING ALGORITHM
+# ==========================================
+
+def generate_spherical_tiling(fov_deg, overlap_ratio):
+    """
+    Generates a list of (yaw, pitch) tuples for spherical tiling that covers
+    the entire sphere without gaps.
     
-    # --- Top Ring (4 photos, looking UP) ---
-    (0, 60), (90, 60), (180, 60), (270, 60),
+    Args:
+        fov_deg (float): Field of view in degrees for each view.
+        overlap_ratio (float): Overlap ratio between adjacent views (0.0 to 1.0).
+                               E.g., 0.25 means 25% overlap.
     
-    # --- Bottom Ring (2 photos, looking DOWN) ---
-    (0, -90), (90, -90)
-]
+    Returns:
+        list: A list of (yaw, pitch) tuples in degrees.
+    """
+    views = []
+    
+    # Calculate the effective angular step (accounting for overlap)
+    step_deg = fov_deg * (1.0 - overlap_ratio)
+    
+    # Calculate pitch angles from -90 to +90 degrees
+    # Start from the nadir (-90°) and go to the zenith (+90°)
+    pitch = -90.0
+    
+    while pitch <= 90.0:
+        if pitch <= -90.0 + 0.001:
+            # Nadir (bottom pole) - single view looking straight down
+            views.append((0.0, -90.0))
+        elif pitch >= 90.0 - 0.001:
+            # Zenith (top pole) - single view looking straight up
+            views.append((0.0, 90.0))
+        else:
+            # Calculate the circumference factor at this latitude
+            # The circumference of a circle at latitude φ is proportional to cos(φ)
+            pitch_rad = np.radians(pitch)
+            circumference_factor = np.cos(pitch_rad)
+            
+            # Calculate the number of horizontal (yaw) steps needed at this pitch
+            # At the equator (pitch=0), circumference_factor=1, so full 360° coverage
+            # Near poles, circumference is smaller, so fewer views needed
+            if circumference_factor > 0.001:
+                # Effective horizontal FOV at this latitude
+                effective_horizontal_coverage = 360.0 * circumference_factor
+                
+                # Number of views needed to cover the full 360° at this latitude
+                num_yaw_steps = max(1, int(np.ceil(360.0 / step_deg * circumference_factor)))
+                
+                # Calculate actual yaw step to evenly distribute views
+                yaw_step = 360.0 / num_yaw_steps
+                
+                for i in range(num_yaw_steps):
+                    yaw = i * yaw_step
+                    views.append((yaw, pitch))
+            else:
+                # Very close to pole, treat as single view
+                views.append((0.0, pitch))
+        
+        # Move to next pitch level
+        pitch += step_deg
+        
+        # Ensure we include the zenith if we're close enough
+        if pitch > 90.0 and pitch - step_deg < 90.0:
+            pitch = 90.0
+    
+    return views
+
+
+# Initialize VIEWS_TO_RENDER using the spherical tiling algorithm
+# with 60-degree FOV and 25% overlap
+VIEWS_TO_RENDER = generate_spherical_tiling(fov_deg=60, overlap_ratio=0.25)
 
 # ==========================================
-# 2. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS
 # ==========================================
 
 def get_perspective_map(fov, theta, phi, height, width):
@@ -90,7 +151,8 @@ def get_perspective_map(fov, theta, phi, height, width):
 
 def process_panorama_views(input_path, output_folder):
     """
-    Loads a single panorama and generates the 14 virtual camera views.
+    Loads a single panorama and generates the virtual camera views
+    based on the dynamically generated VIEWS_TO_RENDER list.
     """
     # 1. Load Image
     img = cv2.imread(input_path)
@@ -99,10 +161,10 @@ def process_panorama_views(input_path, output_folder):
         return
 
     h_pano, w_pano = img.shape[:2]
-    print(f"Generating {len(VIEWS)} virtual camera views...")
+    print(f"Generating {len(VIEWS_TO_RENDER)} virtual camera views...")
     
     # 2. Process Views
-    for idx, (yaw, pitch) in enumerate(tqdm(VIEWS, desc="Processing")):
+    for idx, (yaw, pitch) in enumerate(tqdm(VIEWS_TO_RENDER, desc="Processing")):
         
         # Core Mapping Logic
         lon, lat = get_perspective_map(FOV, yaw, pitch, OUTPUT_SIZE[0], OUTPUT_SIZE[1])
@@ -118,13 +180,13 @@ def process_panorama_views(input_path, output_folder):
         rect_img = cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_WRAP)
 
         # Save
-        save_name = f"{idx:02d}_yaw{yaw}_pitch{pitch}.jpg"
+        save_name = f"{idx:02d}_yaw{yaw:.1f}_pitch{pitch:.1f}.jpg"
         cv2.imwrite(os.path.join(output_folder, save_name), rect_img)
 
     print(f"\n[Success] Processed images saved to: {output_folder}")
 
 # ==========================================
-# 3. MAIN FUNCTION
+# 4. MAIN FUNCTION
 # ==========================================
 def main():
     # --- USER CONFIGURATION ---
