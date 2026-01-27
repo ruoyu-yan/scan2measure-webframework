@@ -15,7 +15,7 @@ CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 
 # Target Input Folder (from your specific request)
-INPUT_FOLDER_NAME = "BIM_Lab_elevator_room0"
+INPUT_FOLDER_NAME = "Area3_study"
 INPUT_DIR = PROJECT_ROOT / "data" / "pano" / "virtual_camera_processed" / INPUT_FOLDER_NAME
 
 # Output Directory
@@ -24,9 +24,10 @@ OUTPUT_DIR = OUTPUT_DIR_ROOT / INPUT_FOLDER_NAME
 
 # Ensure output directories exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+(OUTPUT_DIR / "step0_contrast_boost").mkdir(exist_ok=True)
 (OUTPUT_DIR / "step1_cartoon").mkdir(exist_ok=True)
 (OUTPUT_DIR / "step2_wireframe").mkdir(exist_ok=True)
-(OUTPUT_DIR / "step2_overlay").mkdir(exist_ok=True)
+(OUTPUT_DIR / "step3_overlay").mkdir(exist_ok=True)
 
 # Algorithm Parameters
 # Step 1: Anisotropic Diffusion (The "Cartoonizer")
@@ -34,12 +35,13 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # K: Gradient sensitivity. Lower = preserves more edges, Higher = smooths more.
 # iterations: How strong the effect is.
 DIFFUSION_ALPHA = 0.1
-DIFFUSION_K = 15
-DIFFUSION_ITERS = 20
+DIFFUSION_K = 30
+DIFFUSION_ITERS = 30
 
 # Step 2: Line Segment Detector (LSD)
 # Scale=0.8 downsamples slightly to reduce high-freq noise before detection
-LSD_SCALE = 0.8 
+LSD_SCALE = 0.8
+MIN_LINE_LENGTH = 30
 
 def main():
     # 1. Validation
@@ -71,12 +73,33 @@ def main():
             continue
 
         # ==========================================
+        # STEP 0: CLAHE Contrast Enhancement
+        # ==========================================
+        # Convert BGR to LAB color space
+        lab = cv2.cvtColor(img_color, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        
+        # Apply CLAHE to the L (Lightness) channel
+        clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
+        l_enhanced = clahe.apply(l_channel)
+        
+        # Merge enhanced L with original A and B channels
+        lab_enhanced = cv2.merge([l_enhanced, a_channel, b_channel])
+        
+        # Convert back to BGR
+        contrast_boosted = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+        
+        # Save contrast-boosted image
+        stem = img_path.stem
+        cv2.imwrite(str(OUTPUT_DIR / "step0_contrast_boost" / f"{stem}_contrast_boost.jpg"), contrast_boosted)
+
+        # ==========================================
         # STEP 1: Anisotropic Diffusion (Pre-processing)
         # ==========================================
         try:
-            # Now passing a 3-channel color image
+            # Now passing the contrast-boosted image
             diffused_color = cv2.ximgproc.anisotropicDiffusion(
-                src=img_color,
+                src=contrast_boosted,
                 alpha=DIFFUSION_ALPHA,
                 K=DIFFUSION_K,
                 niters=DIFFUSION_ITERS
@@ -94,6 +117,39 @@ def main():
         # Detect lines in the grayscale version
         lines, width, prec, nfa = lsd.detect(diffused_gray)
 
+        # ==========================================
+        # Border Artifact Filter
+        # ==========================================
+        h, w = diffused_gray.shape[:2]
+        border_margin = 5
+        
+        if lines is not None:
+            filtered_lines = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                
+                # Reject Left Edge artifact
+                if x1 < border_margin and x2 < border_margin:
+                    continue
+                # Reject Right Edge artifact
+                if x1 > w - border_margin and x2 > w - border_margin:
+                    continue
+                # Reject Top Edge artifact
+                if y1 < border_margin and y2 < border_margin:
+                    continue
+                # Reject Bottom Edge artifact
+                if y1 > h - border_margin and y2 > h - border_margin:
+                    continue
+                
+                # Reject short lines (noise filter)
+                length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                if length < MIN_LINE_LENGTH:
+                    continue
+                
+                filtered_lines.append(line)
+            
+            lines = np.array(filtered_lines) if filtered_lines else None
+
         # Create output visualizations
         
         # A. Wireframe Map (Synthetic Style)
@@ -103,7 +159,9 @@ def main():
         overlay_map = diffused_color.copy()
 
         if lines is not None:
-            lsd.drawSegments(wireframe_map, lines)
+            for line in lines:
+                x1, y1, x2, y2 = map(int, line[0])
+                cv2.line(wireframe_map, (x1, y1), (x2, y2), 255, 1)
             
             for line in lines:
                 x1, y1, x2, y2 = map(int, line[0])
@@ -112,17 +170,16 @@ def main():
         # ==========================================
         # SAVE RESULTS
         # ==========================================
-        fname = img_path.name
         
         # Save Step 1: The "Cartoon" Image (Color looks better for inspection)
-        cv2.imwrite(str(OUTPUT_DIR / "step1_cartoon" / fname), diffused_color)
+        cv2.imwrite(str(OUTPUT_DIR / "step1_cartoon" / f"{stem}_cartonized.jpg"), diffused_color)
         
         # Save Step 2: The "Wireframe" 
-        cv2.imwrite(str(OUTPUT_DIR / "step2_wireframe" / fname), wireframe_map)
+        cv2.imwrite(str(OUTPUT_DIR / "step2_wireframe" / f"{stem}_wireframe.jpg"), wireframe_map)
         
-        # Save Step 2: Debug Overlay
-        cv2.imwrite(str(OUTPUT_DIR / "step2_overlay" / fname), overlay_map)
-        
+        # Save Step 3: Debug Overlay
+        cv2.imwrite(str(OUTPUT_DIR / "step3_overlay" / f"{stem}_overlay.jpg"), overlay_map)
+
     print(f"\n[Success] Processing complete.")
     print(f"  - Cartoonized images: {OUTPUT_DIR / 'step1_cartoon'}")
     print(f"  - Wireframes (Black/White): {OUTPUT_DIR / 'step2_wireframe'}")
