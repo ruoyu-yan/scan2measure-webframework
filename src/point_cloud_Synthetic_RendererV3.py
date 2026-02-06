@@ -3,7 +3,12 @@ import open3d as o3d
 import cv2
 import json
 import sys
+import random
 from pathlib import Path
+from sklearn.cluster import DBSCAN
+from scipy.spatial import ConvexHull
+import alphashape
+from shapely.geometry import Polygon, MultiPolygon
 
 # ==========================================
 # 1. SETUP & CONSTANTS
@@ -145,25 +150,35 @@ def filter_jagged_edges(binary_image, min_length=60, epsilon=3.0, max_density=0.
     return output
 
 
-def extract_3d_wireframe(points, output_dir, num_planes=6, distance_threshold=0.05, ransac_n=3, num_iterations=1000, min_inliers=500, parallel_threshold=0.9):
+def extract_3d_wireframe(points, output_dir, distance_threshold=0.05, ransac_n=3, num_iterations=1000, 
+                         min_remaining_points=2000, dbscan_eps=0.20, dbscan_min_samples=30, 
+                         min_hull_area=0.05, parallel_threshold=0.9, alpha_shape_alpha=2.0):
     """
-    Extracts a 3D wireframe by finding plane intersections using RANSAC.
-    Also exports a color-coded point cloud to visualize the detected planes.
+    Extracts a 3D wireframe using Hybrid RANSAC + DBSCAN approach.
+    
+    This method detects planes based on physical connectivity and surface area rather
+    than just mathematical consensus. It splits mathematically coplanar but spatially
+    disconnected objects (like a coffee table and cupboard at the same height) into
+    separate plane clusters. Each valid cluster is represented by an Alpha Shape
+    (Concave Hull) polygon that precisely defines its 2D boundary.
     
     Args:
         points: (N, 3) numpy array of point cloud
         output_dir: Path object where debug PLY will be saved
-        num_planes: Number of dominant planes to detect
-        distance_threshold: RANSAC distance threshold
-        ransac_n: Number of points to sample
+        distance_threshold: RANSAC distance threshold for plane fitting
+        ransac_n: Number of points to sample for RANSAC
         num_iterations: Number of RANSAC iterations
-        min_inliers: Minimum number of inliers for a valid plane
+        min_remaining_points: Stop processing when fewer points remain (default: 2000)
+        dbscan_eps: DBSCAN epsilon - max distance between points in same cluster (meters)
+        dbscan_min_samples: DBSCAN minimum samples per cluster
+        min_hull_area: Minimum convex hull area (sq meters) to accept a cluster
         parallel_threshold: Dot product threshold to consider planes parallel
+        alpha_shape_alpha: Alpha parameter for concave hull generation (higher = tighter fit)
     
     Returns:
         List of 3D line segments as tuples: [(start_point, end_point), ...]
     """
-    print(f"\n[Wireframe Extraction] Starting RANSAC plane segmentation...")
+    print(f"\n[Wireframe Extraction] Starting Hybrid RANSAC + DBSCAN plane segmentation...")
     
     # Create Open3D point cloud for segmentation
     pcd = o3d.geometry.PointCloud()
@@ -175,55 +190,164 @@ def extract_3d_wireframe(points, output_dir, num_planes=6, distance_threshold=0.
     
     # --- VISUALIZATION SETUP ---
     debug_colored_pcds = []
-    # Distinct colors for up to 6 planes (RGB 0-1 range)
-    # Red, Green, Blue, Yellow, Cyan, Magenta
-    plane_colors = [
-        [1, 0, 0], [0, 1, 0], [0, 0, 1], 
-        [1, 1, 0], [0, 1, 1], [1, 0, 1]
-    ]
     # ---------------------------
-
-    for i in range(num_planes):
-        if len(remaining_pcd.points) < min_inliers:
-            print(f"  [Info] Stopping early: only {len(remaining_pcd.points)} points remaining")
-            break
+    
+    iteration = 0
+    total_clusters_accepted = 0
+    
+    # Dynamic while loop - continue processing until points are exhausted
+    while len(remaining_pcd.points) > min_remaining_points:
+        iteration += 1
+        print(f"\n  [Iteration {iteration}] Remaining points: {len(remaining_pcd.points)}")
         
-        # RANSAC plane segmentation
+        # RANSAC plane segmentation - find the dominant mathematical plane
         plane_model, inlier_indices = remaining_pcd.segment_plane(
             distance_threshold=distance_threshold,
             ransac_n=ransac_n,
             num_iterations=num_iterations
         )
         
-        if len(inlier_indices) < min_inliers:
-            print(f"  [Info] Plane {i+1}: Only {len(inlier_indices)} inliers, skipping")
+        # If RANSAC finds too few inliers, we've likely exhausted meaningful planes
+        if len(inlier_indices) < dbscan_min_samples:
+            print(f"  [Info] RANSAC found only {len(inlier_indices)} inliers, stopping")
             break
         
-        # Extract inlier points
+        # Extract inlier points for DBSCAN clustering
         inlier_pcd = remaining_pcd.select_by_index(inlier_indices)
         inlier_points = np.asarray(inlier_pcd.points)
         
-        # --- VISUALIZATION STEP ---
-        # Paint this plane a distinct color
-        color = plane_colors[i % len(plane_colors)]
-        inlier_pcd.paint_uniform_color(color)
-        debug_colored_pcds.append(inlier_pcd)
-        # --------------------------
-
-        # Store plane equation and inliers
-        detected_planes.append((np.array(plane_model), inlier_points))
+        normal = np.array(plane_model[:3])
+        print(f"  RANSAC Plane: {len(inlier_indices)} inliers, Normal: [{normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f}]")
         
-        # Get normal vector for display
-        normal = plane_model[:3]
-        print(f"  Plane {i+1}: {len(inlier_indices)} inliers, Normal: [{normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f}]")
+        # --- DBSCAN CLUSTERING ---
+        # Split the mathematical plane into physically distinct clusters
+        dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
+        cluster_labels = dbscan.fit_predict(inlier_points)
         
-        # Remove inliers from remaining cloud
+        unique_labels = set(cluster_labels)
+        unique_labels.discard(-1)  # Remove noise label
+        
+        print(f"  DBSCAN found {len(unique_labels)} potential clusters (excluding noise)")
+        
+        # --- VALIDATE EACH CLUSTER BY SURFACE AREA ---
+        for label in unique_labels:
+            cluster_mask = cluster_labels == label
+            cluster_points = inlier_points[cluster_mask]
+            
+            if len(cluster_points) < 4:  # Need at least 4 points for ConvexHull in 2D
+                continue
+            
+            # Calculate physical surface area using Convex Hull projection
+            # Step 1: Rotate cluster so plane normal aligns with Z-axis
+            normal_normalized = normal / (np.linalg.norm(normal) + 1e-8)
+            
+            # Find rotation to align normal with Z-axis [0, 0, 1]
+            z_axis = np.array([0, 0, 1])
+            
+            # Handle case where normal is already aligned with Z (or opposite)
+            dot = np.dot(normal_normalized, z_axis)
+            if abs(dot) > 0.9999:
+                # Normal is already (anti-)parallel to Z, use identity or flip
+                if dot > 0:
+                    R = np.eye(3)
+                else:
+                    R = np.diag([1, 1, -1])
+            else:
+                # Rodrigues' rotation formula
+                v = np.cross(normal_normalized, z_axis)
+                s = np.linalg.norm(v)
+                c = dot
+                vx = np.array([[0, -v[2], v[1]],
+                               [v[2], 0, -v[0]],
+                               [-v[1], v[0], 0]])
+                R = np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s + 1e-8))
+            
+            # Step 2: Apply rotation and project to 2D (drop Z)
+            rotated_points = cluster_points @ R.T
+            points_2d = rotated_points[:, :2]  # Drop Z coordinate
+            
+            # Step 3: Calculate Convex Hull area
+            try:
+                hull = ConvexHull(points_2d)
+                hull_area = hull.volume  # In 2D, 'volume' is actually area
+            except Exception:
+                # ConvexHull can fail for degenerate cases
+                continue
+            
+            # Filter out noise - only accept clusters with sufficient area
+            if hull_area < min_hull_area:
+                print(f"    Cluster {label}: {len(cluster_points)} pts, Area={hull_area:.4f} m² - REJECTED (too small)")
+                continue
+            
+            print(f"    Cluster {label}: {len(cluster_points)} pts, Area={hull_area:.4f} m² - ACCEPTED")
+            
+            # --- ALPHA SHAPE (CONCAVE HULL) GENERATION ---
+            # Generate tight boundary polygon for this cluster using alpha shapes
+            # This handles concave geometries (L-shaped rooms, etc.) that convex hulls would close off
+            try:
+                alpha_shape = alphashape.alphashape(points_2d, alpha_shape_alpha)
+                
+                # Ensure result is a Polygon (handle MultiPolygon by taking largest component)
+                if isinstance(alpha_shape, MultiPolygon):
+                    # Take the polygon with the largest area
+                    alpha_shape = max(alpha_shape.geoms, key=lambda p: p.area)
+                elif not isinstance(alpha_shape, Polygon):
+                    # Fallback: if alphashape returns something else (e.g., LineString, Point),
+                    # fall back to convex hull
+                    from shapely.geometry import MultiPoint
+                    alpha_shape = MultiPoint(points_2d).convex_hull
+                    if not isinstance(alpha_shape, Polygon):
+                        print(f"      [Warning] Could not generate valid polygon for cluster {label}, skipping")
+                        continue
+                
+                # Simplify to smooth out jagged artifacts from pixel noise
+                simplified_polygon = alpha_shape.simplify(0.05, preserve_topology=True)
+                
+                # Ensure simplification didn't degenerate the polygon
+                if not isinstance(simplified_polygon, Polygon) or simplified_polygon.is_empty:
+                    simplified_polygon = alpha_shape  # Fall back to unsimplified
+                    
+            except Exception as e:
+                print(f"      [Warning] Alpha shape generation failed for cluster {label}: {e}")
+                continue
+            # -----------------------------------------------
+            
+            # --- VISUALIZATION: Generate unique random color for each accepted cluster ---
+            cluster_color = [random.random(), random.random(), random.random()]
+            
+            cluster_pcd = o3d.geometry.PointCloud()
+            cluster_pcd.points = o3d.utility.Vector3dVector(cluster_points)
+            cluster_pcd.paint_uniform_color(cluster_color)
+            debug_colored_pcds.append(cluster_pcd)
+            # -----------------------------------------------------------------------------
+            
+            # Store rich geometric data for this plane cluster
+            # Recompute plane equation (d value) for this specific cluster
+            cluster_centroid = np.mean(cluster_points, axis=0)
+            d = -np.dot(normal, cluster_centroid)
+            cluster_plane_eq = np.array([normal[0], normal[1], normal[2], d])
+            
+            # Store as dictionary with all transformation data needed for future intersection mapping
+            plane_data = {
+                'plane_model': cluster_plane_eq,           # [a, b, c, d] plane equation
+                'points_3d': cluster_points,                # Original 3D points
+                'shapely_2d_polygon': simplified_polygon,   # Alpha shape boundary in 2D local coords
+                'rotation_matrix': R,                       # Rotation to flatten plane to XY
+                'centroid': cluster_centroid,               # 3D centroid of the cluster
+                'normal': normal_normalized,                # Unit normal vector
+            }
+            
+            detected_planes.append(plane_data)
+            total_clusters_accepted += 1
+        
+        # Remove ALL original RANSAC inliers from remaining cloud
+        # This ensures the loop progresses to the next surface
         remaining_pcd = remaining_pcd.select_by_index(inlier_indices, invert=True)
     
-    print(f"  Detected {len(detected_planes)} planes")
+    print(f"\n  Detected {total_clusters_accepted} physically distinct planar clusters")
 
     # --- SAVE DEBUG POINT CLOUD ---
-    print("  [Debug] Saving RANSAC visualization...")
+    print("  [Debug] Saving RANSAC+DBSCAN visualization...")
     # Paint remaining noise points Grey
     remaining_pcd.paint_uniform_color([0.5, 0.5, 0.5])
     debug_colored_pcds.append(remaining_pcd)
@@ -238,33 +362,122 @@ def extract_3d_wireframe(points, output_dir, num_planes=6, distance_threshold=0.
     print(f"  [Debug] Saved to: {debug_ply_path}")
     # ------------------------------
     
-    # Find plane-plane intersections
+    # --- PHASE 3: TOPOLOGY-AWARE PROJECTION-CLIPPING INTERSECTION ---
+    # Only create wireframes where physical surfaces actually touch
     wireframe_segments = []
+    adjacency_threshold = 0.15  # 15 cm maximum distance for adjacency
+    min_segment_length = 0.1   # Minimum segment length to accept
     
-    print(f"\n[Wireframe Extraction] Computing plane intersections...")
+    print(f"\n[Wireframe Extraction] Computing topology-aware plane intersections...")
+    print(f"  Adjacency threshold: {adjacency_threshold} m")
+    
+    # Helper function to reconstruct 3D boundary from 2D polygon
+    def polygon_to_3d_boundary(plane_data):
+        """
+        Transform 2D polygon vertices back to 3D space using stored transformation data.
+        
+        The 2D polygon was created by:
+        1. Rotating cluster_points by R.T (so normal aligns with Z)
+        2. Taking only X, Y coordinates (dropping Z)
+        
+        To reverse this:
+        1. Add back the Z coordinate (use Z from the rotated centroid)
+        2. Apply inverse rotation R (since R @ R.T = I)
+        """
+        polygon = plane_data['shapely_2d_polygon']
+        R = plane_data['rotation_matrix']
+        centroid = plane_data['centroid']
+        normal = plane_data['normal']
+        
+        # Get 2D boundary coordinates from polygon exterior
+        coords_2d = np.array(polygon.exterior.coords)
+        
+        # The original points were transformed as: rotated = original @ R.T
+        # Then 2D was taken as: coords_2d = rotated[:, :2]
+        # The Z value in rotated space is constant (the plane is flat after rotation)
+        
+        # Find the Z level in rotated space by rotating the centroid
+        centroid_rotated = centroid @ R.T
+        z_level = centroid_rotated[2]
+        
+        # Reconstruct 3D points in rotated coordinate system
+        coords_3d_rotated = np.column_stack([coords_2d, np.full(len(coords_2d), z_level)])
+        
+        # Apply inverse rotation: original = rotated @ R (since R is orthogonal, R.T.T = R)
+        coords_3d_world = coords_3d_rotated @ R
+        
+        return coords_3d_world
+    
+    # Helper function to compute minimum distance between two point sets
+    def min_boundary_distance(boundary1, boundary2):
+        """
+        Compute minimum Euclidean distance between two sets of boundary points.
+        Uses vectorized operations for efficiency.
+        """
+        # Compute pairwise distances using broadcasting
+        # boundary1: (N, 3), boundary2: (M, 3)
+        # diff: (N, M, 3)
+        diff = boundary1[:, np.newaxis, :] - boundary2[np.newaxis, :, :]
+        distances = np.sqrt(np.sum(diff ** 2, axis=2))
+        return np.min(distances)
+    
+    # Helper function to project points onto a line and get t-parameter values
+    def project_to_line(points, line_point, line_direction):
+        """Project 3D points onto a line, returning t-parameter values."""
+        vecs = points - line_point
+        t_values = np.dot(vecs, line_direction)
+        return t_values
+    
+    pairs_checked = 0
+    pairs_adjacent = 0
     
     for i in range(len(detected_planes)):
         for j in range(i + 1, len(detected_planes)):
-            plane1_eq, plane1_pts = detected_planes[i]
-            plane2_eq, plane2_pts = detected_planes[j]
+            pairs_checked += 1
             
-            # Get normal vectors
+            plane1_data = detected_planes[i]
+            plane2_data = detected_planes[j]
+            
+            # Get plane equations and normals
+            plane1_eq = plane1_data['plane_model']
+            plane2_eq = plane2_data['plane_model']
             n1 = plane1_eq[:3]
             n2 = plane2_eq[:3]
             
-            # Check if planes are parallel
+            # Check if planes are parallel (skip if so)
             dot_product = abs(np.dot(n1, n2))
             if dot_product > parallel_threshold:
                 continue
             
-            # Compute intersection line direction
-            line_dir = np.cross(n1, n2)
-            line_dir = line_dir / (np.linalg.norm(line_dir) + 1e-8)
+            # --- ADJACENCY CHECK ---
+            # Reconstruct 3D boundaries from stored 2D polygons
+            boundary1_3d = polygon_to_3d_boundary(plane1_data)
+            boundary2_3d = polygon_to_3d_boundary(plane2_data)
             
-            # Find a point on the intersection line
+            # Calculate minimum distance between boundaries
+            min_dist = min_boundary_distance(boundary1_3d, boundary2_3d)
+            
+            # Skip if planes are not physically adjacent
+            if min_dist > adjacency_threshold:
+                continue
+            
+            pairs_adjacent += 1
+            
+            # --- INTERSECTION LINE CALCULATION ---
+            # Compute intersection line direction using cross product of normals
+            line_dir = np.cross(n1, n2)
+            line_dir_norm = np.linalg.norm(line_dir)
+            if line_dir_norm < 1e-8:
+                continue
+            line_dir = line_dir / line_dir_norm
+            
+            # Find a point on the intersection line by solving the plane equations
             d1, d2 = plane1_eq[3], plane2_eq[3]
+            
+            # Choose the axis with smallest component in line_dir to fix at 0
             fix_axis = np.argmin(np.abs(line_dir))
             axes = [k for k in range(3) if k != fix_axis]
+            
             A = np.array([[n1[axes[0]], n1[axes[1]]],
                           [n2[axes[0]], n2[axes[1]]]])
             b = np.array([-d1, -d2])
@@ -278,33 +491,34 @@ def extract_3d_wireframe(points, output_dir, num_planes=6, distance_threshold=0.
             point_on_line[axes[0]] = solution[0]
             point_on_line[axes[1]] = solution[1]
             
-            # Project inlier points to line to find intervals
-            def project_to_line(points, line_point, line_direction):
-                vecs = points - line_point
-                t_values = np.dot(vecs, line_direction)
-                return t_values
+            # --- PROJECTION-CLIPPING ---
+            # Project 3D boundary vertices onto the intersection line to find valid intervals
+            t1_values = project_to_line(boundary1_3d, point_on_line, line_dir)
+            t2_values = project_to_line(boundary2_3d, point_on_line, line_dir)
             
-            t1_values = project_to_line(plane1_pts, point_on_line, line_dir)
-            t2_values = project_to_line(plane2_pts, point_on_line, line_dir)
-            
+            # Get intervals for each plane's boundary
             t1_min, t1_max = np.min(t1_values), np.max(t1_values)
             t2_min, t2_max = np.min(t2_values), np.max(t2_values)
             
+            # Find overlapping interval
             t_overlap_min = max(t1_min, t2_min)
             t_overlap_max = min(t1_max, t2_max)
             
+            # Skip if no overlap or negligible overlap
             if t_overlap_max <= t_overlap_min:
                 continue
             
             segment_length = t_overlap_max - t_overlap_min
-            if segment_length < 0.1:
+            if segment_length < min_segment_length:
                 continue
             
+            # Create the wireframe segment from the overlapping portion
             start_point = point_on_line + t_overlap_min * line_dir
             end_point = point_on_line + t_overlap_max * line_dir
             
             wireframe_segments.append((start_point, end_point))
     
+    print(f"  Pairs checked: {pairs_checked}, Adjacent pairs: {pairs_adjacent}")
     print(f"  Found {len(wireframe_segments)} wireframe segments")
     return wireframe_segments
 
@@ -546,12 +760,12 @@ def main():
     print("--- Testing Synthetic Point Cloud Renderer ---")
     
     # 1. Paths
-    pcd_path = project_root / "data" / "raw_point_cloud" / "Area_3_study_no_RGB.ply"
-    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "Area_3_study_no_RGB" / "global_alignment.json"
+    pcd_path = project_root / "data" / "raw_point_cloud" / "tmb_office_corridors_subsampled.ply"
+    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "tmb_office_corridors_subsampled" / "global_alignment.json"
     # Assuming metadata is here based on generate_density_image structure
-    meta_path = project_root / "data" / "density_image" / "Area_3_study_no_RGB" / "metadata.json"
+    meta_path = project_root / "data" / "density_image" / "tmb_office_corridors_subsampled" / "metadata.json"
     
-    target_room = "Area3_study"
+    target_room = "TMB_office1"
 
     # Extract point cloud name from pcd_path stem for output directory structure
     point_cloud_name = pcd_path.stem
@@ -583,40 +797,57 @@ def main():
     
     room_info = next(r for r in align['alignment_results'] if r['room_name'] == target_room)
     
-    # 3. Construct Metric Pose
-    # Use relative position in density image to interpolate Point Cloud Bounds
-    # This bypasses global coordinate mismatches
+    # 3. Construct Metric Pose using Absolute Coordinate Transformation
+    # Use global metadata to compute world coordinates directly, avoiding
+    # errors when point cloud covers a larger area than the original single-room map
     
     pose_px = room_info['camera_pose_global']
     img_width = meta['image_width']
     
-    # Calculate relative position (0.0 to 1.0)
-    rel_u = pose_px[0] / img_width
-    rel_v = pose_px[1] / img_width  # Assuming square image
+    # Retrieve absolute transformation parameters from metadata
+    # CONVERT FROM MM TO METERS
+    min_coords = [c / 1000.0 for c in meta['min_coords']]
+    max_dim = meta['max_dim'] / 1000.0
+    offset = meta.get('offset', [0, 0])
+    offset = [o / 1000.0 for o in offset]  # Convert offset to meters too
     
-    # Get Point Cloud Bounds
-    pcd_min = np.array(pcd.get_min_bound())
-    pcd_max = np.array(pcd.get_max_bound())
-    pcd_range = pcd_max - pcd_min
+    # Calculate scale factor: meters per pixel
+    scale_factor = max_dim / img_width
     
-    # Interpolate Pose
-    # X: Min + rel_u * Range
-    cam_x = pcd_min[0] + rel_u * pcd_range[0]
+    # Compute absolute world X coordinate
+    # X = min_coords[0] + (pixel_u * scale_factor) - offset[0]
+    cam_x = min_coords[0] + (pose_px[0] * scale_factor) - offset[0]
     
-    # Y: Max - rel_v * Range (Image V goes down, World Y goes up)
-    cam_y = pcd_max[1] - rel_v * pcd_range[1]
+    # Compute absolute world Y coordinate
+    # Y = min_coords[1] + max_dim - (pixel_v * scale_factor) - offset[1]
+    # This handles inversion between top-down image coords and bottom-up world coords
+    cam_y = min_coords[1] + max_dim - (pose_px[1] * scale_factor) - offset[1]
     
     pose_world_xy = np.array([cam_x, cam_y])
     
-    print(f"\n[DEBUG] Pose Calculation (Relative to PC Bounds):")
+    print(f"\n[DEBUG] Pose Calculation (Absolute Coordinate Transformation):")
     print(f"  Pixel: {pose_px}, Image Width: {img_width}")
-    print(f"  Relative: ({rel_u:.3f}, {rel_v:.3f})")
-    print(f"  PC Bounds X: [{pcd_min[0]:.3f}, {pcd_max[0]:.3f}]")
-    print(f"  PC Bounds Y: [{pcd_min[1]:.3f}, {pcd_max[1]:.3f}]")
-    print(f"  Calculated Pose: {pose_world_xy}")
+    print(f"  min_coords: {min_coords}, max_dim: {max_dim}, offset: {offset}")
+    print(f"  scale_factor: {scale_factor:.6f} m/px")
+    print(f"  Absolute World X: {cam_x:.3f} m")
+    print(f"  Absolute World Y: {cam_y:.3f} m")
     
-    # Z from Floor Detection + 1.6m
-    floor_z = find_floor_z(points)
+    # Z from Local Floor Detection + 1.6m
+    # Create a local crop of points within 2.0m radius of calculated X,Y
+    # to avoid defaulting to the building's lowest level floor
+    local_radius = 2.0
+    distances_xy = np.sqrt((points[:, 0] - cam_x)**2 + (points[:, 1] - cam_y)**2)
+    local_mask = distances_xy <= local_radius
+    local_points = points[local_mask]
+    
+    if len(local_points) > 100:
+        floor_z = find_floor_z(local_points)
+        print(f"  Local floor detection: {len(local_points)} points within {local_radius}m radius")
+    else:
+        # Fallback to global floor detection if local crop is too sparse
+        floor_z = find_floor_z(points)
+        print(f"  WARNING: Only {len(local_points)} local points, using global floor detection")
+    
     cam_z = floor_z + 1.6
     
     # Yaw from Alignment
@@ -624,6 +855,7 @@ def main():
     
     final_pose = np.array([pose_world_xy[0], pose_world_xy[1], cam_z])
     
+    print(f"  Floor Z: {floor_z:.3f} m, Camera Z: {cam_z:.3f} m")
     print(f"\nComputed Camera Pose: {final_pose}")
     print(f"Room Orientation: {yaw_deg} deg")
     
@@ -633,12 +865,14 @@ def main():
     # 4. Extract 3D Wireframe from Point Cloud (Plane Intersections)
     wireframe_segments = extract_3d_wireframe(
         points,
-        output_dir=output_base_dir,  # <--- NEW ARGUMENT ADDED HERE
-        num_planes=6,
-        distance_threshold=0.05,
+        output_dir=output_base_dir,
+        distance_threshold=0.03,
         ransac_n=3,
         num_iterations=1000,
-        min_inliers=500,
+        min_remaining_points=2000,
+        dbscan_eps=0.20,
+        dbscan_min_samples=30,
+        min_hull_area=0.90,  # in square meters
         parallel_threshold=0.9
     )
 
