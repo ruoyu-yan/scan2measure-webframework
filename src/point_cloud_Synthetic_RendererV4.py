@@ -176,7 +176,13 @@ def extract_3d_wireframe(points, output_dir, distance_threshold=0.05, ransac_n=3
         alpha_shape_alpha: Alpha parameter for concave hull generation (higher = tighter fit)
     
     Returns:
-        List of 3D line segments as tuples: [(start_point, end_point), ...]
+        tuple: (wireframe_segments, detected_planes)
+            wireframe_segments: List of dicts, each with keys:
+                'start': (3,) ndarray - segment start point
+                'end':   (3,) ndarray - segment end point
+                'plane_i': int - index of first parent plane in detected_planes
+                'plane_j': int - index of second parent plane in detected_planes
+            detected_planes: List of plane data dicts (used for visibility pre-filtering)
     """
     print(f"\n[Wireframe Extraction] Starting Hybrid RANSAC + DBSCAN plane segmentation...")
     
@@ -516,13 +522,18 @@ def extract_3d_wireframe(points, output_dir, distance_threshold=0.05, ransac_n=3
             start_point = point_on_line + t_overlap_min * line_dir
             end_point = point_on_line + t_overlap_max * line_dir
             
-            wireframe_segments.append((start_point, end_point))
+            wireframe_segments.append({
+                'start': start_point,
+                'end': end_point,
+                'plane_i': i,
+                'plane_j': j,
+            })
     
     print(f"  Pairs checked: {pairs_checked}, Adjacent pairs: {pairs_adjacent}")
     print(f"  Found {len(wireframe_segments)} wireframe segments")
-    return wireframe_segments
+    return wireframe_segments, detected_planes
 
-def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0, wireframe_segments=None):
+def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0, wireframe_segments=None, detected_planes=None):
     """
     Renders a synthetic depth-based wireframe from the point cloud.
     
@@ -532,7 +543,8 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
         rotation_deg: Global alignment rotation (Room orientation)
         view_yaw: Relative yaw of the virtual camera (0 = Front, 90 = Right, etc.)
         view_pitch: Relative pitch of the virtual camera (positive = look up, negative = look down)
-        wireframe_segments: List of 3D line segments for Channel B (from extract_3d_wireframe)
+        wireframe_segments: List of segment dicts for Channel B (from extract_3d_wireframe)
+        detected_planes: List of plane data dicts (from extract_3d_wireframe)
     """
     print(f"  > Rendering View (Yaw={view_yaw} deg, Pitch={view_pitch} deg)...")
     
@@ -628,6 +640,73 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
     kernel = np.ones((3,3), np.uint8)
     depth_filled = cv2.dilate(depth_valid, kernel, iterations=2)
     
+    # 8b. Plane Visibility Pre-Filtering
+    # For each detected plane, project a random subsample of its points into the
+    # current camera view and compare against the depth_filled buffer.  A plane is
+    # "visible" only if >= VIS_MIN_RATIO of sampled points pass the Z-test.
+    VIS_SAMPLE_N   = 200   # max points to sample per plane
+    VIS_DEPTH_TOL  = 0.05  # metres – same tolerance used for per-pixel Z-test
+    VIS_MIN_RATIO  = 0.05  # 5% of samples must be visible
+    
+    plane_visible = {}  # dict mapping plane index -> bool
+    
+    if detected_planes is not None:
+        total_yaw_rad_vis = np.radians(-(rotation_deg + view_yaw))
+        pitch_rad_vis = np.radians(-view_pitch)
+        c_yaw_v, s_yaw_v = np.cos(total_yaw_rad_vis), np.sin(total_yaw_rad_vis)
+        c_pitch_v, s_pitch_v = np.cos(pitch_rad_vis), np.sin(pitch_rad_vis)
+        
+        R_z_vis = np.array([[c_yaw_v, -s_yaw_v, 0],
+                            [s_yaw_v,  c_yaw_v, 0],
+                            [0,        0,       1]])
+        R_x_vis = np.array([[1,         0,          0],
+                            [0, c_pitch_v, -s_pitch_v],
+                            [0, s_pitch_v,  c_pitch_v]])
+        
+        for pi, pdata in enumerate(detected_planes):
+            pts = pdata['points_3d']
+            # Random subsample
+            n_sample = min(VIS_SAMPLE_N, len(pts))
+            indices = np.random.choice(len(pts), n_sample, replace=False)
+            sample_pts = pts[indices]
+            
+            # Vectorised transform: translate -> yaw -> swizzle -> pitch
+            vecs = sample_pts - camera_pose_global
+            local = vecs @ R_z_vis.T
+            cam = np.empty_like(local)
+            cam[:, 0] = local[:, 0]
+            cam[:, 1] = -local[:, 2]
+            cam[:, 2] = local[:, 1]
+            cam = cam @ R_x_vis.T
+            
+            # Keep only points in front of camera
+            front = cam[:, 2] > 0.1
+            if not np.any(front):
+                plane_visible[pi] = False
+                continue
+            
+            cam_f = cam[front]
+            u_p = (cam_f[:, 0] * FOCAL_LENGTH / cam_f[:, 2] + CX).astype(int)
+            v_p = (cam_f[:, 1] * FOCAL_LENGTH / cam_f[:, 2] + CY).astype(int)
+            depths_p = cam_f[:, 2]
+            
+            # Bounds mask
+            bm = (u_p >= 0) & (u_p < IMG_W) & (v_p >= 0) & (v_p < IMG_H)
+            if not np.any(bm):
+                plane_visible[pi] = False
+                continue
+            
+            u_b, v_b, d_b = u_p[bm], v_p[bm], depths_p[bm]
+            buf_d = depth_filled[v_b, u_b]
+            
+            # Pass Z-test: point depth <= buffer depth + tolerance, or buffer is empty (0)
+            passed = (buf_d == 0) | (d_b <= buf_d + VIS_DEPTH_TOL)
+            ratio = np.sum(passed) / n_sample  # relative to total sampled, not just in-bounds
+            plane_visible[pi] = (ratio >= VIS_MIN_RATIO)
+        
+        vis_count = sum(1 for v in plane_visible.values() if v)
+        print(f"    Plane visibility: {vis_count}/{len(detected_planes)} planes visible")
+    
     # Normalize for visualization/edge detection
     # Map range [0.1m, 10m] to [0, 255]
     depth_vis = cv2.normalize(depth_filled, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
@@ -695,8 +774,20 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
         total_yaw_rad_seg = np.radians(-(rotation_deg + view_yaw))
         pitch_rad_seg = np.radians(-view_pitch)
         
+        segments_skipped_by_plane = 0
+        
         # Process each wireframe segment
-        for start_3d, end_3d in wireframe_segments:
+        for seg in wireframe_segments:
+            start_3d = seg['start']
+            end_3d   = seg['end']
+            pi_a     = seg['plane_i']
+            pi_b     = seg['plane_j']
+            
+            # Pre-filter: skip segment if NEITHER parent plane is visible
+            if plane_visible and not plane_visible.get(pi_a, True) and not plane_visible.get(pi_b, True):
+                segments_skipped_by_plane += 1
+                continue
+            
             # Transform endpoints to camera space
             start_cam = transform_point_to_camera(start_3d, camera_pose_global, total_yaw_rad_seg, pitch_rad_seg)
             end_cam = transform_point_to_camera(end_3d, camera_pose_global, total_yaw_rad_seg, pitch_rad_seg)
@@ -738,8 +829,68 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
             if (start_2d[1] < 0 and end_2d[1] < 0) or (start_2d[1] >= IMG_H and end_2d[1] >= IMG_H):
                 continue
             
-            # Draw the line segment
-            cv2.line(normal_edges, (u1, v1), (u2, v2), 255, thickness=1)
+            # Z-Test: Discretize the 3D segment and only draw visible portions
+            SAMPLE_STEP = 0.02   # meters between test points
+            DEPTH_TOL   = 0.05   # occlusion tolerance in meters
+            
+            seg_vec_3d = end_3d - start_3d
+            seg_length = np.linalg.norm(seg_vec_3d)
+            num_samples = max(int(np.ceil(seg_length / SAMPLE_STEP)), 2)
+            
+            prev_px = None       # previous visible pixel (for drawing sub-segments)
+            prev_visible = False
+            
+            for si in range(num_samples + 1):
+                t = si / num_samples  # parametric position [0, 1]
+                sample_3d = start_3d + t * seg_vec_3d
+                
+                # Transform sample to camera space
+                sample_cam = transform_point_to_camera(
+                    sample_3d, camera_pose_global,
+                    total_yaw_rad_seg, pitch_rad_seg
+                )
+                
+                # Skip if behind camera
+                if sample_cam[2] <= 0.1:
+                    prev_visible = False
+                    prev_px = None
+                    continue
+                
+                # Project to 2D
+                sample_2d = project_to_2d(sample_cam)
+                if sample_2d is None:
+                    prev_visible = False
+                    prev_px = None
+                    continue
+                
+                su = int(round(sample_2d[0]))
+                sv = int(round(sample_2d[1]))
+                
+                # Bounds check
+                if su < 0 or su >= IMG_W or sv < 0 or sv >= IMG_H:
+                    prev_visible = False
+                    prev_px = None
+                    continue
+                
+                # Depth test against the filled depth buffer
+                buf_depth = depth_filled[sv, su]
+                sample_depth = sample_cam[2]
+                
+                # buf_depth == 0 means no depth data (empty region); treat as visible
+                is_visible = (buf_depth == 0) or (sample_depth <= buf_depth + DEPTH_TOL)
+                
+                cur_px = (su, sv)
+                
+                if is_visible:
+                    if prev_visible and prev_px is not None:
+                        cv2.line(normal_edges, prev_px, cur_px, 255, thickness=1)
+                    prev_px = cur_px
+                    prev_visible = True
+                else:
+                    prev_visible = False
+                    prev_px = None
+        
+        print(f"    Segments skipped by plane pre-filter: {segments_skipped_by_plane}/{len(wireframe_segments)}")
     
     # 12. Geometric Filtering: Remove short/noisy edge segments from both channels
     # Filter Channel A (geometry-filtered depth edges) with min_size of 60 pixels
@@ -863,7 +1014,7 @@ def main():
     output_base_dir = project_root / "data" / "debug_renderer" / point_cloud_name
     
     # 4. Extract 3D Wireframe from Point Cloud (Plane Intersections)
-    wireframe_segments = extract_3d_wireframe(
+    wireframe_segments, detected_planes = extract_3d_wireframe(
         points,
         output_dir=output_base_dir,
         distance_threshold=0.03,
@@ -883,7 +1034,8 @@ def main():
         edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe = render_synthetic_wireframe(
             points, final_pose, yaw_deg, 
             view_yaw=view_yaw, view_pitch=view_pitch,
-            wireframe_segments=wireframe_segments
+            wireframe_segments=wireframe_segments,
+            detected_planes=detected_planes
         )
         
         # Save Channel A outputs (depth-based wireframe)
