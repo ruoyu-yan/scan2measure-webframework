@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 from pathlib import Path
-from scipy.optimize import minimize, linear_sum_assignment
+from scipy.optimize import linear_sum_assignment
 
 # ==========================================
 # 1. PATH SETUP & CONFIGURATION
@@ -149,20 +149,15 @@ def mean_distance_points_to_polygon(points, polygon):
 
 def align_polygons(target_poly, source_poly, force_scale=None, asymmetric_mode=False):
     """
-    Aligns source_poly (LGT) to one target_poly (RoomFormer).
-    If asymmetric_mode is True, error is computed only as Source->Target distance,
-    allowing shorter LGT shapes to fit inside longer RoomFormer slots.
+    Aligns source_poly (LGT) to one target_poly (RoomFormer) using discrete
+    vertex-to-vertex snapping.  Scales and rotates around the local origin
+    (0,0), then brute-force tries every (rotation, src_vertex, tgt_vertex)
+    combination to find the geometric anchor with the lowest boundary error.
+
     Returns: transformed_source_poly, (scale, rotation_deg, translation), error
+        The returned *translation* is the shift applied to the local origin
+        (0,0), i.e. the global position of the camera after transformation.
     """
-    # Global alignment strategy:
-    # - Scale by bounding box diagonal ratio
-    # - Initialize translation by aligning bounding box centers
-    # - For each 90-degree rotation, optimize translation (dx, dy) via minimize()
-    #   using symmetric Chamfer distance between polygon boundaries.
-
-    target_center = bounding_box_center(target_poly)
-    source_center = bounding_box_center(source_poly)
-
     target_diag = bounding_box_diagonal(target_poly)
     source_diag = bounding_box_diagonal(source_poly)
     if source_diag <= 1e-12:
@@ -172,7 +167,9 @@ def align_polygons(target_poly, source_poly, force_scale=None, asymmetric_mode=F
         scale_factor = target_diag / source_diag
     else:
         scale_factor = float(force_scale)
-    centered_source = (source_poly - source_center) * scale_factor
+
+    # Scale source polygon around the origin so (0,0) stays at the camera
+    scaled_source = source_poly * scale_factor
 
     best_error = float('inf')
     best_angle = 0
@@ -182,30 +179,28 @@ def align_polygons(target_poly, source_poly, force_scale=None, asymmetric_mode=F
     rotations = [0, 90, 180, 270]
     for angle in rotations:
         R = _rotation_matrix(angle)
+        rotated_source = scaled_source @ R.T
 
-        def objective(x):
-            dx, dy = float(x[0]), float(x[1])
-            transformed = centered_source @ R.T + (target_center + np.array([dx, dy]))
-            d_st = mean_distance_points_to_polygon(transformed, target_poly)
-            if asymmetric_mode:
-                return d_st
-            d_ts = mean_distance_points_to_polygon(target_poly, transformed)
-            return 0.5 * (d_st + d_ts)
+        # Try snapping every source vertex to every target vertex
+        for i_src in range(rotated_source.shape[0]):
+            for j_tgt in range(target_poly.shape[0]):
+                # Translation that snaps source vertex i_src to target vertex j_tgt
+                translation = target_poly[j_tgt] - rotated_source[i_src]
+                transformed = rotated_source + translation
 
-        res = minimize(
-            objective,
-            x0=np.array([0.0, 0.0]),
-            method="Powell",
-            options={"maxiter": 300, "xtol": 1e-4, "ftol": 1e-4},
-        )
+                # Evaluate alignment quality
+                d_st = mean_distance_points_to_polygon(transformed, target_poly)
+                if asymmetric_mode:
+                    err = d_st
+                else:
+                    d_ts = mean_distance_points_to_polygon(target_poly, transformed)
+                    err = 0.5 * (d_st + d_ts)
 
-        err = float(res.fun)
-        if err < best_error:
-            best_error = err
-            best_angle = angle
-            dx_opt, dy_opt = float(res.x[0]), float(res.x[1])
-            best_translation = target_center + np.array([dx_opt, dy_opt])
-            best_poly = centered_source @ R.T + best_translation
+                if err < best_error:
+                    best_error = err
+                    best_angle = angle
+                    best_translation = translation.copy()
+                    best_poly = transformed.copy()
 
     return best_poly, (scale_factor, best_angle, best_translation), best_error
 
@@ -465,18 +460,10 @@ def main():
                 break
         
         # Calculate global camera pose
-        # LGT-Net camera originates at (0, 0) in its local frame
-        local_camera = np.array([0.0, 0.0])
-        
-        # Get the centroid of the LGT polygon's bounding box
-        lgt_bbox_center = bounding_box_center(lgt_poly)
-        
-        # Apply transformation: subtract centroid, scale, rotate, then translate
-        centered_camera = local_camera - lgt_bbox_center
-        scaled_camera = centered_camera * m["scale"]
-        R = _rotation_matrix(m["angle"])
-        rotated_camera = R @ scaled_camera
-        camera_pose_global = rotated_camera + m["trans"]
+        # With vertex-snapping, the transformation scales & rotates around
+        # the local origin (0,0) then translates.  The returned translation
+        # IS the global position of the camera (local origin).
+        camera_pose_global = m["trans"]
         
         alignment_results.append({
             "room_name": room_name,
