@@ -46,6 +46,7 @@ def align_to_floor(pcd):
         R = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c_ang) / (s ** 2))
 
     pcd.rotate(R, center=(0, 0, 0))
+    R_total = R.copy()
 
     # Upside Down Check
     points = np.asarray(pcd.points)
@@ -56,8 +57,9 @@ def align_to_floor(pcd):
         print("    Detected ceiling as plane. Flipping 180 degrees...")
         R_flip = pcd.get_rotation_matrix_from_xyz((np.pi, 0, 0))
         pcd.rotate(R_flip, center=(0, 0, 0))
+        R_total = R_flip @ R_total
     
-    return pcd
+    return pcd, R_total
 
 # -------------------------------------------------------------------------
 # 2. HORIZONTAL ALIGNMENT (Walls Parallel to X/Y Axes)
@@ -75,7 +77,7 @@ def align_to_axes(pcd):
 
     if len(wall_normals) == 0:
         print("    Warning: No vertical walls detected. Skipping horizontal alignment.")
-        return pcd
+        return pcd, np.eye(3)
 
     # Calculate angles in 2D
     angles = np.arctan2(wall_normals[:, 1], wall_normals[:, 0])
@@ -91,7 +93,7 @@ def align_to_axes(pcd):
     R_yaw = pcd.get_rotation_matrix_from_xyz((0, 0, -dominant_angle))
     pcd.rotate(R_yaw, center=(0,0,0))
     
-    return pcd
+    return pcd, R_yaw
 
 # -------------------------------------------------------------------------
 # 3. DENSITY MAP GENERATION (Proportional)
@@ -132,12 +134,21 @@ def generate_density(point_cloud, width=256, height=256):
     if np.max(density) > 0:
         density = density / np.max(density)
 
+    # The effective translation that maps a rotated point to pixel space is:
+    #   pixel = (p[:2] - min_coords[:2] + offset) / max_dim * (image_res - 1)
+    # So the shift from the rotated-cloud origin is  -min_coords[:2] + offset
+    # We store the full 3-component translation used to shift the cloud.
+    translation = np.zeros(3)
+    translation[:2] = -min_coords[:2] + offset
+    translation[2] = -min_coords[2]
+
     metadata = {
         "min_coords": min_coords.tolist(),
         "max_dim": float(max_dim),
         "offset": offset.tolist(),
         "image_width": int(width),
         "image_height": int(height),
+        "translation": translation.tolist(),
     }
 
     return density, metadata
@@ -147,7 +158,7 @@ def generate_density(point_cloud, width=256, height=256):
 # -------------------------------------------------------------------------
 def main():
     # --- CONFIGURATION ---
-    FILENAME = "Area_3_selected_rooms_no_RGB.ply"
+    FILENAME = "tmb_office_one_corridor_dense.ply"
     # ---------------------
 
     input_path = input_dir / FILENAME
@@ -162,9 +173,14 @@ def main():
     pcd = o3d.io.read_point_cloud(str(input_path))
     if pcd.is_empty(): sys.exit(1)
     
-    # 2. Align (Z and XY)
-    pcd = align_to_floor(pcd)
-    pcd = align_to_axes(pcd)
+    # 2. Align (Z and XY) — track cumulative rotation
+    R_global = np.eye(3)
+
+    pcd, R_floor = align_to_floor(pcd)
+    R_global = R_floor @ R_global
+
+    pcd, R_yaw = align_to_axes(pcd)
+    R_global = R_yaw @ R_global
 
     # 3. Units & Quantization
     points = np.asarray(pcd.points)
@@ -184,6 +200,10 @@ def main():
     # 4. Generate Density Image
     print("  > Generating proportional density map...")
     density_map, metadata = generate_density(unique_coords)
+
+    # Embed the accumulated rotation matrix so downstream tools can
+    # replicate the exact coordinate system from the raw point cloud.
+    metadata["rotation_matrix"] = R_global.tolist()
     
     density_img_vis = (density_map * 255).astype(np.uint8)
     
