@@ -210,7 +210,7 @@ def align_polygons(target_poly, source_poly, force_scale=None, asymmetric_mode=F
 def main():
     # --- USER CONFIGURATION: FOLDER NAMES ---
     # Change these variables to switch between datasets
-    rf_folder_name = "tmb_office_one_corridor"
+    rf_folder_name = "tmb_office_one_corridor_dense"
     lgt_folders = ["TMB_office1", "TMB_corridor_south2", "TMB_corridor_south1"]
     
     # --- PATH CONSTRUCTION ---
