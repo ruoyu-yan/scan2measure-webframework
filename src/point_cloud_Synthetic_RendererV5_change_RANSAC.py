@@ -998,8 +998,8 @@ def main():
         # Construct Metric Pose using Absolute Coordinate Transformation
         pose_px = room_info['camera_pose_global']
         
-        cam_x = min_coords[0] + (pose_px[0] * scale_factor)
-        cam_y = min_coords[1] + max_dim - (pose_px[1] * scale_factor)
+        cam_x = min_coords[0] - offset[0] + (pose_px[0] * scale_factor)
+        cam_y = min_coords[1] - offset[1] + (pose_px[1] * scale_factor)
         
         pose_world_xy = np.array([cam_x, cam_y])
         
