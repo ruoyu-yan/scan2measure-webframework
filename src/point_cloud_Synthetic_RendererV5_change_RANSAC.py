@@ -5,7 +5,7 @@ import json
 import sys
 import random
 from pathlib import Path
-from sklearn.cluster import DBSCAN
+
 from scipy.spatial import ConvexHull
 import alphashape
 from shapely.geometry import Polygon, MultiPolygon
@@ -225,10 +225,10 @@ def extract_3d_wireframe(points, output_dir, distance_threshold=0.05, ransac_n=3
         normal = np.array(plane_model[:3])
         print(f"  RANSAC Plane: {len(inlier_indices)} inliers, Normal: [{normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f}]")
         
-        # --- DBSCAN CLUSTERING ---
+        # --- DBSCAN CLUSTERING (Open3D C++ backend) ---
         # Split the mathematical plane into physically distinct clusters
-        dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
-        cluster_labels = dbscan.fit_predict(inlier_points)
+        labels = np.array(inlier_pcd.cluster_dbscan(eps=dbscan_eps, min_points=dbscan_min_samples, print_progress=True))
+        cluster_labels = labels
         
         unique_labels = set(cluster_labels)
         unique_labels.discard(-1)  # Remove noise label
@@ -911,25 +911,17 @@ def main():
     print("--- Testing Synthetic Point Cloud Renderer ---")
     
     # 1. Paths
-    pcd_path = project_root / "data" / "raw_point_cloud" / "tmb_office_one_corridor_dense.ply"
-    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "tmb_office_one_corridor_dense" / "global_alignment.json"
+    point_cloud_name = "tmb_office_one_corridor"
+    pcd_path = project_root / "data" / "raw_point_cloud" / f"{point_cloud_name}.ply"
+    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / point_cloud_name / "global_alignment.json"
     # Assuming metadata is here based on generate_density_image structure
-    meta_path = project_root / "data" / "density_image" / "tmb_office_one_corridor_dense" / "metadata.json"
+    meta_path = project_root / "data" / "density_image" / point_cloud_name / "metadata.json"
     
-    target_room = "TMB_office1"
+    target_rooms = ["TMB_office1", "TMB_corridor_south2", "TMB_corridor_south1"]
 
-    # Extract point cloud name from pcd_path stem for output directory structure
-    point_cloud_name = pcd_path.stem
-    output_dir_a = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_A"
-    output_dir_a_filtered = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_A_Filtered"
-    output_dir_b = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_B"
-    output_dir_b_filtered = project_root / "data" / "debug_renderer" / point_cloud_name / "Channel_B_Filtered"
-    output_dir_combined = project_root / "data" / "debug_renderer" / point_cloud_name / "Combined"
-    output_dir_a.mkdir(parents=True, exist_ok=True)
-    output_dir_a_filtered.mkdir(parents=True, exist_ok=True)
-    output_dir_b.mkdir(parents=True, exist_ok=True)
-    output_dir_b_filtered.mkdir(parents=True, exist_ok=True)
-    output_dir_combined.mkdir(parents=True, exist_ok=True)
+    # Define the base output folder (e.g. .../debug_renderer/tmb_office_one_corridor)
+    output_base_dir = project_root / "data" / "debug_renderer" / point_cloud_name
+    output_base_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. Load Data
     print("Loading Metadata & Alignment...")
@@ -953,75 +945,15 @@ def main():
     print(f"  Min: {pcd.get_min_bound()}")
     print(f"  Max: {pcd.get_max_bound()}")
     
-    # Extract Room Info
-    
-    room_info = next(r for r in align['alignment_results'] if r['room_name'] == target_room)
-    
-    # 3. Construct Metric Pose using Absolute Coordinate Transformation
-    # Use global metadata to compute world coordinates directly, avoiding
-    # errors when point cloud covers a larger area than the original single-room map
-    
-    pose_px = room_info['camera_pose_global']
+    # Precompute shared metadata values (constant across rooms)
     img_width = meta['image_width']
-    
-    # Retrieve absolute transformation parameters from metadata
-    # CONVERT FROM MM TO METERS
     min_coords = [c / 1000.0 for c in meta['min_coords']]
     max_dim = meta['max_dim'] / 1000.0
     offset = meta.get('offset', [0, 0])
     offset = [o / 1000.0 for o in offset]  # Convert offset to meters too
-    
-    # Calculate scale factor: meters per pixel
     scale_factor = max_dim / img_width
     
-    # Compute absolute world X coordinate
-    # Try removing - offset[0]
-    cam_x = min_coords[0] + (pose_px[0] * scale_factor) 
-
-    # Compute absolute world Y coordinate
-    # Try removing - offset[1]
-    cam_y = min_coords[1] + max_dim - (pose_px[1] * scale_factor)
-    
-    pose_world_xy = np.array([cam_x, cam_y])
-    
-    print(f"\n[DEBUG] Pose Calculation (Absolute Coordinate Transformation):")
-    print(f"  Pixel: {pose_px}, Image Width: {img_width}")
-    print(f"  min_coords: {min_coords}, max_dim: {max_dim}, offset: {offset}")
-    print(f"  scale_factor: {scale_factor:.6f} m/px")
-    print(f"  Absolute World X: {cam_x:.3f} m")
-    print(f"  Absolute World Y: {cam_y:.3f} m")
-    
-    # Z from Local Floor Detection + 1.6m
-    # Create a local crop of points within 2.0m radius of calculated X,Y
-    # to avoid defaulting to the building's lowest level floor
-    local_radius = 2.0
-    distances_xy = np.sqrt((points[:, 0] - cam_x)**2 + (points[:, 1] - cam_y)**2)
-    local_mask = distances_xy <= local_radius
-    local_points = points[local_mask]
-    
-    if len(local_points) > 100:
-        floor_z = find_floor_z(local_points)
-        print(f"  Local floor detection: {len(local_points)} points within {local_radius}m radius")
-    else:
-        # Fallback to global floor detection if local crop is too sparse
-        floor_z = find_floor_z(points)
-        print(f"  WARNING: Only {len(local_points)} local points, using global floor detection")
-    
-    cam_z = floor_z + 1.6
-    
-    # Yaw from Alignment
-    yaw_deg = room_info['transformation']['rotation_deg']
-    
-    final_pose = np.array([pose_world_xy[0], pose_world_xy[1], cam_z])
-    
-    print(f"  Floor Z: {floor_z:.3f} m, Camera Z: {cam_z:.3f} m")
-    print(f"\nComputed Camera Pose: {final_pose}")
-    print(f"Room Orientation: {yaw_deg} deg")
-    
-    # Define the base output folder (e.g. .../debug_renderer/Area_3_study_no_RGB)
-    output_base_dir = project_root / "data" / "debug_renderer" / point_cloud_name
-    
-    # 4. Extract 3D Wireframe from Point Cloud (Plane Intersections)
+    # 3. Extract 3D Wireframe from Point Cloud (Plane Intersections) — once for the whole cloud
     wireframe_segments, detected_planes = extract_3d_wireframe(
         points,
         output_dir=output_base_dir,
@@ -1035,48 +967,117 @@ def main():
         parallel_threshold=0.9
     )
 
-    # 5. Render all views!
-    print(f"\nRendering {len(VIEWS_TO_RENDER)} Synthetic Views...")
-    
-    for view_yaw, view_pitch in VIEWS_TO_RENDER:
-        edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe = render_synthetic_wireframe(
-            points, final_pose, yaw_deg, 
-            view_yaw=view_yaw, view_pitch=view_pitch,
-            wireframe_segments=wireframe_segments,
-            detected_planes=detected_planes
+    # 4. Iterate over each target room
+    for target_room in target_rooms:
+        print(f"\n{'='*60}")
+        print(f"Processing Room: {target_room}")
+        print(f"{'='*60}")
+        
+        # Create per-room output directories
+        room_output_dir = output_base_dir / target_room
+        output_dir_a = room_output_dir / "Channel_A"
+        output_dir_a_filtered = room_output_dir / "Channel_A_Filtered"
+        output_dir_b = room_output_dir / "Channel_B"
+        output_dir_b_filtered = room_output_dir / "Channel_B_Filtered"
+        output_dir_combined = room_output_dir / "Combined"
+        output_dir_a.mkdir(parents=True, exist_ok=True)
+        output_dir_a_filtered.mkdir(parents=True, exist_ok=True)
+        output_dir_b.mkdir(parents=True, exist_ok=True)
+        output_dir_b_filtered.mkdir(parents=True, exist_ok=True)
+        output_dir_combined.mkdir(parents=True, exist_ok=True)
+        
+        # Extract Room Info
+        room_info = next(
+            (r for r in align['alignment_results'] if r['room_name'] == target_room),
+            None
         )
+        if room_info is None:
+            print(f"  [WARNING] Room '{target_room}' not found in alignment results, skipping.")
+            continue
         
-        # Save Channel A outputs (depth-based wireframe)
-        edge_path = output_dir_a / f"synthetic_wireframe_yaw{view_yaw}_pitch{view_pitch}.png"
-        depth_path = output_dir_a / f"synthetic_depth_yaw{view_yaw}_pitch{view_pitch}.png"
+        # Construct Metric Pose using Absolute Coordinate Transformation
+        pose_px = room_info['camera_pose_global']
         
-        cv2.imwrite(str(edge_path), edges)
-        cv2.imwrite(str(depth_path), depth_map)
+        cam_x = min_coords[0] + (pose_px[0] * scale_factor)
+        cam_y = min_coords[1] + max_dim - (pose_px[1] * scale_factor)
         
-        # Save Channel A Filtered outputs (short edges removed)
-        edge_filtered_path = output_dir_a_filtered / f"synthetic_wireframe_filtered_yaw{view_yaw}_pitch{view_pitch}.png"
-        cv2.imwrite(str(edge_filtered_path), edges_filtered)
+        pose_world_xy = np.array([cam_x, cam_y])
         
-        # Save Channel B outputs (normal-based crease edges)
-        normal_edge_path = output_dir_b / f"synthetic_normal_edges_yaw{view_yaw}_pitch{view_pitch}.png"
-        cv2.imwrite(str(normal_edge_path), normal_edges)
+        print(f"\n[DEBUG] Pose Calculation (Absolute Coordinate Transformation):")
+        print(f"  Pixel: {pose_px}, Image Width: {img_width}")
+        print(f"  min_coords: {min_coords}, max_dim: {max_dim}, offset: {offset}")
+        print(f"  scale_factor: {scale_factor:.6f} m/px")
+        print(f"  Absolute World X: {cam_x:.3f} m")
+        print(f"  Absolute World Y: {cam_y:.3f} m")
         
-        # Save Channel B Filtered outputs (short edges removed)
-        normal_edge_filtered_path = output_dir_b_filtered / f"synthetic_normal_edges_filtered_yaw{view_yaw}_pitch{view_pitch}.png"
-        cv2.imwrite(str(normal_edge_filtered_path), normal_edges_filtered)
+        # Z from Local Floor Detection + 1.6m
+        local_radius = 2.0
+        distances_xy = np.sqrt((points[:, 0] - cam_x)**2 + (points[:, 1] - cam_y)**2)
+        local_mask = distances_xy <= local_radius
+        local_points = points[local_mask]
         
-        # Save Combined wireframe (filtered A | filtered B)
-        combined_path = output_dir_combined / f"synthetic_combined_yaw{view_yaw}_pitch{view_pitch}.png"
-        cv2.imwrite(str(combined_path), combined_wireframe)
+        if len(local_points) > 100:
+            floor_z = find_floor_z(local_points)
+            print(f"  Local floor detection: {len(local_points)} points within {local_radius}m radius")
+        else:
+            floor_z = find_floor_z(points)
+            print(f"  WARNING: Only {len(local_points)} local points, using global floor detection")
         
-        print(f"    Saved: {edge_path.name}, {edge_filtered_path.name}, {normal_edge_path.name}, {normal_edge_filtered_path.name}, {combined_path.name}")
+        cam_z = floor_z + 1.6
+        
+        # Yaw from Alignment
+        yaw_deg = room_info['transformation']['rotation_deg']
+        
+        final_pose = np.array([pose_world_xy[0], pose_world_xy[1], cam_z])
+        
+        print(f"  Floor Z: {floor_z:.3f} m, Camera Z: {cam_z:.3f} m")
+        print(f"\nComputed Camera Pose: {final_pose}")
+        print(f"Room Orientation: {yaw_deg} deg")
+        
+        # 5. Render all views for this room
+        print(f"\nRendering {len(VIEWS_TO_RENDER)} Synthetic Views for '{target_room}'...")
+        
+        for view_yaw, view_pitch in VIEWS_TO_RENDER:
+            edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe = render_synthetic_wireframe(
+                points, final_pose, yaw_deg, 
+                view_yaw=view_yaw, view_pitch=view_pitch,
+                wireframe_segments=wireframe_segments,
+                detected_planes=detected_planes
+            )
+            
+            # Save Channel A outputs (depth-based wireframe)
+            edge_path = output_dir_a / f"synthetic_wireframe_yaw{view_yaw}_pitch{view_pitch}.png"
+            depth_path = output_dir_a / f"synthetic_depth_yaw{view_yaw}_pitch{view_pitch}.png"
+            
+            cv2.imwrite(str(edge_path), edges)
+            cv2.imwrite(str(depth_path), depth_map)
+            
+            # Save Channel A Filtered outputs (short edges removed)
+            edge_filtered_path = output_dir_a_filtered / f"synthetic_wireframe_filtered_yaw{view_yaw}_pitch{view_pitch}.png"
+            cv2.imwrite(str(edge_filtered_path), edges_filtered)
+            
+            # Save Channel B outputs (normal-based crease edges)
+            normal_edge_path = output_dir_b / f"synthetic_normal_edges_yaw{view_yaw}_pitch{view_pitch}.png"
+            cv2.imwrite(str(normal_edge_path), normal_edges)
+            
+            # Save Channel B Filtered outputs (short edges removed)
+            normal_edge_filtered_path = output_dir_b_filtered / f"synthetic_normal_edges_filtered_yaw{view_yaw}_pitch{view_pitch}.png"
+            cv2.imwrite(str(normal_edge_filtered_path), normal_edges_filtered)
+            
+            # Save Combined wireframe (filtered A | filtered B)
+            combined_path = output_dir_combined / f"synthetic_combined_yaw{view_yaw}_pitch{view_pitch}.png"
+            cv2.imwrite(str(combined_path), combined_wireframe)
+            
+            print(f"    Saved: {edge_path.name}, {edge_filtered_path.name}, {normal_edge_path.name}, {normal_edge_filtered_path.name}, {combined_path.name}")
+        
+        print(f"\n[Success] Room '{target_room}' — {len(VIEWS_TO_RENDER)} views saved to: {room_output_dir}")
     
-    print(f"\n[Success] All {len(VIEWS_TO_RENDER)} views saved to:")
-    print(f"  Channel A: {output_dir_a}")
-    print(f"  Channel A Filtered: {output_dir_a_filtered}")
-    print(f"  Channel B: {output_dir_b}")
-    print(f"  Channel B Filtered: {output_dir_b_filtered}")
-    print(f"  Combined: {output_dir_combined}")
+    print(f"\n{'='*60}")
+    print(f"[Done] All {len(target_rooms)} rooms processed.")
+    print(f"  Base output: {output_base_dir}")
+    print(f"  debug_ransac_planes.ply saved in: {output_base_dir}")
+    for room in target_rooms:
+        print(f"  {room}/: Channel_A, Channel_A_Filtered, Channel_B, Channel_B_Filtered, Combined")
 
 if __name__ == "__main__":
     main()
