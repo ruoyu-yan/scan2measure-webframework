@@ -11,77 +11,28 @@ OUTPUT_SIZE = (1024, 1024)
 FOV = 60                    
 
 # ==========================================
-# 2. SPHERICAL TILING ALGORITHM
+# 2. SPHERICAL TILING (22-View, 60-Degree FOV)
 # ==========================================
 
-def generate_spherical_tiling(fov_deg, overlap_ratio):
-    """
-    Generates a list of (yaw, pitch) tuples for spherical tiling that covers
-    the entire sphere without gaps.
-    
-    Args:
-        fov_deg (float): Field of view in degrees for each view.
-        overlap_ratio (float): Overlap ratio between adjacent views (0.0 to 1.0).
-                               E.g., 0.25 means 25% overlap.
-    
-    Returns:
-        list: A list of (yaw, pitch) tuples in degrees.
-    """
-    views = []
-    
-    # Calculate the effective angular step (accounting for overlap)
-    step_deg = fov_deg * (1.0 - overlap_ratio)
-    
-    # Calculate pitch angles from -90 to +90 degrees
-    # Start from the nadir (-90°) and go to the zenith (+90°)
-    pitch = -90.0
-    
-    while pitch <= 90.0:
-        if pitch <= -90.0 + 0.001:
-            # Nadir (bottom pole) - single view looking straight down
-            views.append((0.0, -90.0))
-        elif pitch >= 90.0 - 0.001:
-            # Zenith (top pole) - single view looking straight up
-            views.append((0.0, 90.0))
-        else:
-            # Calculate the circumference factor at this latitude
-            # The circumference of a circle at latitude φ is proportional to cos(φ)
-            pitch_rad = np.radians(pitch)
-            circumference_factor = np.cos(pitch_rad)
-            
-            # Calculate the number of horizontal (yaw) steps needed at this pitch
-            # At the equator (pitch=0), circumference_factor=1, so full 360° coverage
-            # Near poles, circumference is smaller, so fewer views needed
-            if circumference_factor > 0.001:
-                # Effective horizontal FOV at this latitude
-                effective_horizontal_coverage = 360.0 * circumference_factor
-                
-                # Number of views needed to cover the full 360° at this latitude
-                num_yaw_steps = max(1, int(np.ceil(360.0 / step_deg * circumference_factor)))
-                
-                # Calculate actual yaw step to evenly distribute views
-                yaw_step = 360.0 / num_yaw_steps
-                
-                for i in range(num_yaw_steps):
-                    yaw = i * yaw_step
-                    views.append((yaw, pitch))
-            else:
-                # Very close to pole, treat as single view
-                views.append((0.0, pitch))
-        
-        # Move to next pitch level
-        pitch += step_deg
-        
-        # Ensure we include the zenith if we're close enough
-        if pitch > 90.0 and pitch - step_deg < 90.0:
-            pitch = 90.0
-    
-    return views
+# Unified 22-View Spherical Tiling (60-Degree FOV)
+# Format: (yaw_offset, pitch_offset) in degrees
+VIEWS_TO_RENDER = [
+    # --- Equator (Looking straight ahead) ---
+    (0.0, 0.0), (45.0, 0.0), (90.0, 0.0), (135.0, 0.0), 
+    (180.0, 0.0), (225.0, 0.0), (270.0, 0.0), (315.0, 0.0),
 
+    # --- Upper Ring (Tilting up 45 degrees) ---
+    (0.0, 45.0), (60.0, 45.0), (120.0, 45.0), 
+    (180.0, 45.0), (240.0, 45.0), (300.0, 45.0),
 
-# Initialize VIEWS_TO_RENDER using the spherical tiling algorithm
-# with 60-degree FOV and 25% overlap
-VIEWS_TO_RENDER = generate_spherical_tiling(fov_deg=60, overlap_ratio=0.25)
+    # --- Lower Ring (Tilting down 45 degrees) ---
+    (0.0, -45.0), (60.0, -45.0), (120.0, -45.0), 
+    (180.0, -45.0), (240.0, -45.0), (300.0, -45.0),
+
+    # --- Poles (Straight up and straight down) ---
+    (0.0, 90.0),   # Zenith (Ceiling)
+    (0.0, -90.0)   # Nadir (Floor)
+]
 
 # ==========================================
 # 3. HELPER FUNCTIONS
@@ -190,7 +141,7 @@ def process_panorama_views(input_path, output_folder):
 # ==========================================
 def main():
     # --- USER CONFIGURATION ---
-    target_image_name = "BIM_Lab_elevator_room.jpg"
+    target_image_name = "TMB_office1.jpg"
     
     # --- DIRECTORY SETUP ---
     # Matches LGT-Net logic: navigate relative to the script file

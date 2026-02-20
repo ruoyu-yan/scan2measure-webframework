@@ -22,17 +22,24 @@ FOV = 60  # Degrees
 FOCAL_LENGTH = 0.5 * IMG_W / np.tan(0.5 * np.radians(FOV))
 CX, CY = (IMG_W - 1) / 2.0, (IMG_H - 1) / 2.0
 
-# Views to render: (yaw_offset, pitch_offset) in degrees
-# 8 standard horizontal views at 45-degree intervals
+# Unified 22-View Spherical Tiling (60-Degree FOV)
+# Format: (yaw_offset, pitch_offset) in degrees
 VIEWS_TO_RENDER = [
-    (0, 0),    # Front
-    (45, 0),   # Front-Right
-    (90, 0),   # Right
-    (135, 0),  # Back-Right
-    (180, 0),  # Back
-    (225, 0),  # Back-Left
-    (270, 0),  # Left
-    (315, 0),  # Front-Left
+    # --- Equator (Looking straight ahead) ---
+    (0.0, 0.0), (45.0, 0.0), (90.0, 0.0), (135.0, 0.0), 
+    (180.0, 0.0), (225.0, 0.0), (270.0, 0.0), (315.0, 0.0),
+
+    # --- Upper Ring (Tilting up 45 degrees) ---
+    (0.0, 45.0), (60.0, 45.0), (120.0, 45.0), 
+    (180.0, 45.0), (240.0, 45.0), (300.0, 45.0),
+
+    # --- Lower Ring (Tilting down 45 degrees) ---
+    (0.0, -45.0), (60.0, -45.0), (120.0, -45.0), 
+    (180.0, -45.0), (240.0, -45.0), (300.0, -45.0),
+
+    # --- Poles (Straight up and straight down) ---
+    (0.0, 90.0),   # Zenith (Ceiling)
+    (0.0, -90.0)   # Nadir (Floor)
 ]
 
 # ==========================================
@@ -911,13 +918,13 @@ def main():
     print("--- Testing Synthetic Point Cloud Renderer ---")
     
     # 1. Paths
-    point_cloud_name = "tmb_office_one_corridor"
+    point_cloud_name = "tmb_office1_subsampled"
     pcd_path = project_root / "data" / "raw_point_cloud" / f"{point_cloud_name}.ply"
     json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / point_cloud_name / "global_alignment.json"
     # Assuming metadata is here based on generate_density_image structure
     meta_path = project_root / "data" / "density_image" / point_cloud_name / "metadata.json"
     
-    target_rooms = ["TMB_office1", "TMB_corridor_south2", "TMB_corridor_south1"]
+    target_rooms = ["TMB_office1"]
 
     # Define the base output folder (e.g. .../debug_renderer/tmb_office_one_corridor)
     output_base_dir = project_root / "data" / "debug_renderer" / point_cloud_name
