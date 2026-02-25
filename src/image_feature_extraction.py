@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 import sys
+import json
 from pathlib import Path
 from tqdm import tqdm
 
@@ -15,7 +16,7 @@ CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 
 # Target Input Folder (from your specific request)
-INPUT_FOLDER_NAME = "Area3_study"
+INPUT_FOLDER_NAME = "TMB_office1"
 INPUT_DIR = PROJECT_ROOT / "data" / "pano" / "virtual_camera_processed" / INPUT_FOLDER_NAME
 
 # Output Directory
@@ -63,6 +64,9 @@ def main():
     # Initialize LSD (Line Segment Detector)
     # STANDARD mode is generally best for geometric features
     lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD, scale=LSD_SCALE)
+
+    # Dictionary to store extracted line coordinates for all images
+    all_extracted_lines = {}
 
     # ... (inside the loop)
     for img_path in tqdm(image_files, desc="Extracting Features"):
@@ -150,6 +154,14 @@ def main():
             
             lines = np.array(filtered_lines) if filtered_lines else None
 
+        # Extract line coordinates for JSON export
+        image_lines = []
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                image_lines.append([[float(x1), float(y1)], [float(x2), float(y2)]])
+        all_extracted_lines[img_path.name] = image_lines
+
         # Create output visualizations
         
         # A. Wireframe Map (Synthetic Style)
@@ -180,9 +192,15 @@ def main():
         # Save Step 3: Debug Overlay
         cv2.imwrite(str(OUTPUT_DIR / "step3_overlay" / f"{stem}_overlay.jpg"), overlay_map)
 
+    # Save extracted line coordinates to JSON
+    json_output_path = OUTPUT_DIR / "extracted_2d_lines.json"
+    with open(json_output_path, "w") as f:
+        json.dump(all_extracted_lines, f, indent=4)
+
     print(f"\n[Success] Processing complete.")
     print(f"  - Cartoonized images: {OUTPUT_DIR / 'step1_cartoon'}")
     print(f"  - Wireframes (Black/White): {OUTPUT_DIR / 'step2_wireframe'}")
+    print(f"  - Line coordinates JSON: {json_output_path}")
 
 if __name__ == "__main__":
     main()

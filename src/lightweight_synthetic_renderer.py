@@ -104,6 +104,9 @@ def filter_jagged_edges(binary_image, min_length=60, epsilon=3.0, max_density=0.
 def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0, wireframe_segments=None, detected_planes=None):
     print(f"  > Rendering View (Yaw={view_yaw} deg, Pitch={view_pitch} deg)...")
     
+    # Track visible 3D lines for PnL solver
+    visible_3d_lines = []
+    
     vecs = points - camera_pose_global
     
     total_yaw_rad = np.radians(-(rotation_deg + view_yaw))
@@ -306,6 +309,7 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
             
             prev_px = None       
             prev_visible = False
+            segment_has_visible_parts = False
             
             for si in range(num_samples + 1):
                 t = si / num_samples  
@@ -336,6 +340,7 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
                 cur_px = (su, sv)
                 
                 if is_visible:
+                    segment_has_visible_parts = True
                     if prev_visible and prev_px is not None:
                         cv2.line(normal_edges, prev_px, cur_px, 255, thickness=1)
                     prev_px = cur_px
@@ -343,12 +348,19 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
                 else:
                     prev_visible = False
                     prev_px = None
+            
+            # Record visible segment for PnL solver
+            if segment_has_visible_parts:
+                visible_3d_lines.append({
+                    "start": start_3d.tolist(),
+                    "end": end_3d.tolist()
+                })
         
     edges_filtered = filter_short_edges(edges_geometry_filtered, min_size=60)
     normal_edges_filtered = filter_short_edges(normal_edges, min_size=60)
     combined_wireframe = cv2.bitwise_or(edges_filtered, normal_edges_filtered)
     
-    return edges, depth_vis, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe
+    return edges, depth_vis, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe, visible_3d_lines
 
 # ==========================================
 # 4. MAIN PIPELINE
@@ -431,8 +443,11 @@ def main():
         
         print(f"  Computed Camera Pose: {final_pose}")
         
+        # Dictionary to store all visible 3D lines for this room
+        all_visible_3d_lines = {}
+        
         for view_yaw, view_pitch in VIEWS_TO_RENDER:
-            edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe = render_synthetic_wireframe(
+            edges, depth_map, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe, visible_3d_lines = render_synthetic_wireframe(
                 points, final_pose, yaw_deg, 
                 view_yaw=view_yaw, view_pitch=view_pitch,
                 wireframe_segments=wireframe_segments,
@@ -445,6 +460,15 @@ def main():
             cv2.imwrite(str(output_dir_b / f"synthetic_normal_edges_yaw{view_yaw}_pitch{view_pitch}.png"), normal_edges)
             cv2.imwrite(str(output_dir_b_filtered / f"synthetic_normal_edges_filtered_yaw{view_yaw}_pitch{view_pitch}.png"), normal_edges_filtered)
             cv2.imwrite(str(output_dir_combined / f"synthetic_combined_yaw{view_yaw}_pitch{view_pitch}.png"), combined_wireframe)
+            
+            # Store visible 3D line coordinates for PnL solver
+            view_key = f"yaw{view_yaw}_pitch{view_pitch}"
+            all_visible_3d_lines[view_key] = visible_3d_lines
+        
+        # Save all visible 3D lines to a single JSON file
+        json_output_path = room_output_dir / "visible_3d_lines.json"
+        with open(json_output_path, "w") as f:
+            json.dump(all_visible_3d_lines, f, indent=4)
             
     print(f"\n[Done] Ready for the optimizer loop!")
 
