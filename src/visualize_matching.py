@@ -1,11 +1,14 @@
 """
 visualize_matching.py — Human-inspection overlay for pose estimation results.
 
-For each of the 22 perspective crops, produces a side-by-side PNG:
-  Left  : original photo crop + extracted 2D lines (green)
-  Right : original photo crop + projected 3D wireframe segments (cyan)
+For each of the 22 perspective crops, produces a 2-panel PNG:
+  Left  : photo + 2D lines (green, thick) + projected 3D wireframe (cyan, thin)
+  Right : photo + matched intersection pairs (colored by group, with connecting lines)
 
-Run after feature_matching.py.
+Falls back to old 2-panel layout (2D-only left, 3D-only right) if camera_pose.json
+lacks the V2 intersection keys.
+
+Run after feature_matching.py or feature_matchingV2.py.
 
 Output: data/pose_estimates/<ROOM_NAME>/vis/<view_name>.png
 """
@@ -29,7 +32,11 @@ CROP_FOV_DEG     = 60.0
 # Drawing
 COLOR_2D  = (0,   220,  0)    # green  — extracted 2D lines
 COLOR_3D  = (255, 200,  0)    # cyan   — projected 3D wireframe
-LINE_THICKNESS = 2
+GROUP_COLORS = [
+    (60,  60,  255),   # red   (BGR) — group 0
+    (255, 100, 60),    # blue  (BGR) — group 1
+    (0,   230, 230),   # yellow (BGR) — group 2
+]
 
 
 # ============================================================
@@ -58,34 +65,10 @@ def parse_view_angles(filename):
     return np.radians(float(m.group(1))), np.radians(float(m.group(2)))
 
 
-def project_point(P_world, R_pano, t, R_crop):
-    """
-    Project a 3D world point into a perspective crop.
-
-    R_pano : (3,3) world-to-pano rotation   (from camera_pose.json)
-    t      : (3,)  camera position in world (from camera_pose.json)
-    R_crop : (3,3) crop orientation matrix  (from make_view_rotation)
-
-    Returns (u, v, depth) in crop pixel space. depth may be <= 0 (behind camera).
-    """
-    P_pano  = R_pano @ (P_world - t)       # world → panorama frame
-    P_crop  = R_crop.T @ P_pano            # pano  → crop camera frame
-
-    f  = focal()
-    cx = (CROP_W - 1) / 2.0
-    cy = (CROP_H - 1) / 2.0
-
-    depth = P_crop[2]
-    u = f * (P_crop[0] / depth) + cx if depth > 1e-4 else None
-    v = -f * (P_crop[1] / depth) + cy if depth > 1e-4 else None
-    return u, v, depth
-
-
 def clip_to_front(P1, P2, R_pano, t, R_crop, eps=0.05):
     """
     Transform both endpoints to crop-camera space and clip the segment
     so both endpoints have z > eps.
-
     Returns (P1_cam, P2_cam) both with z > eps, or None if fully behind.
     """
     def to_cam(P):
@@ -95,13 +78,13 @@ def clip_to_front(P1, P2, R_pano, t, R_crop, eps=0.05):
     c2 = to_cam(P2)
 
     if c1[2] < eps and c2[2] < eps:
-        return None          # fully behind camera
+        return None
 
-    if c1[2] < eps:          # c1 behind, c2 in front → clip c1
+    if c1[2] < eps:
         alpha = (eps - c1[2]) / (c2[2] - c1[2])
         c1 = c1 + alpha * (c2 - c1)
 
-    if c2[2] < eps:          # c2 behind, c1 in front → clip c2
+    if c2[2] < eps:
         alpha = (eps - c2[2]) / (c1[2] - c2[2])
         c2 = c2 + alpha * (c1 - c2)
 
@@ -123,20 +106,47 @@ def pixel_in_bounds(u, v, margin=0):
             -margin <= v <= CROP_H + margin)
 
 
+def sphere_to_crop_pixel(sphere_pt, R_crop):
+    """Project a unit-sphere point to crop pixel coords. Returns (u,v) or None."""
+    P_crop = R_crop.T @ sphere_pt
+    if P_crop[2] <= 1e-4:
+        return None
+    f  = focal()
+    cx = (CROP_W - 1) / 2.0
+    cy = (CROP_H - 1) / 2.0
+    u = f * (P_crop[0] / P_crop[2]) + cx
+    v = -f * (P_crop[1] / P_crop[2]) + cy
+    return int(round(u)), int(round(v))
+
+
+def world_to_crop_pixel(P_world, R_pano, t, R_crop):
+    """Project a 3D world point to crop pixel coords. Returns (u,v) or None."""
+    P_pano = R_pano @ (P_world - t)
+    P_crop = R_crop.T @ P_pano
+    if P_crop[2] <= 1e-4:
+        return None
+    f  = focal()
+    cx = (CROP_W - 1) / 2.0
+    cy = (CROP_H - 1) / 2.0
+    u = f * (P_crop[0] / P_crop[2]) + cx
+    v = -f * (P_crop[1] / P_crop[2]) + cy
+    return int(round(u)), int(round(v))
+
+
 # ============================================================
 # DRAW HELPERS
 # ============================================================
 
-def draw_2d_lines(img, lines):
-    """Draw a list of [[u1,v1],[u2,v2]] pixel segments in green."""
+def draw_2d_lines(img, lines, color=COLOR_2D, thickness=2):
+    """Draw a list of [[u1,v1],[u2,v2]] pixel segments."""
     for (p1, p2) in lines:
         pt1 = (int(round(p1[0])), int(round(p1[1])))
         pt2 = (int(round(p2[0])), int(round(p2[1])))
-        cv2.line(img, pt1, pt2, COLOR_2D, LINE_THICKNESS, cv2.LINE_AA)
+        cv2.line(img, pt1, pt2, color, thickness, cv2.LINE_AA)
 
 
-def draw_3d_wireframe(img, wireframe_segs, R_pano, t, R_crop):
-    """Project and draw 3D wireframe segments as cyan lines."""
+def draw_3d_wireframe(img, wireframe_segs, R_pano, t, R_crop, color=COLOR_3D, thickness=1):
+    """Project and draw 3D wireframe segments."""
     for seg in wireframe_segs:
         P1 = np.asarray(seg['start'], dtype=float)
         P2 = np.asarray(seg['end'],   dtype=float)
@@ -149,28 +159,79 @@ def draw_3d_wireframe(img, wireframe_segs, R_pano, t, R_crop):
         u1, v1 = cam_to_pixel(c1)
         u2, v2 = cam_to_pixel(c2)
 
-        # Skip if both projected pixels are far outside the image
         if not (pixel_in_bounds(u1, v1, margin=50) or
                 pixel_in_bounds(u2, v2, margin=50)):
             continue
 
-        # Clamp to image bounds for drawing
         u1c = int(np.clip(u1, 0, CROP_W - 1))
         v1c = int(np.clip(v1, 0, CROP_H - 1))
         u2c = int(np.clip(u2, 0, CROP_W - 1))
         v2c = int(np.clip(v2, 0, CROP_H - 1))
 
-        cv2.line(img, (u1c, v1c), (u2c, v2c), COLOR_3D, LINE_THICKNESS, cv2.LINE_AA)
+        cv2.line(img, (u1c, v1c), (u2c, v2c), color, thickness, cv2.LINE_AA)
 
 
-# ============================================================
-# LEGEND
-# ============================================================
+def draw_intersection_panel(img, R_pano, t, R_crop, inter_2d, inter_3d, matched_pairs):
+    """
+    Draw matched intersection pairs on the image.
+    2D intersections → open circles, 3D intersections → filled circles.
+    Matched pairs connected by thin lines. Colored by group.
+    Returns match count string.
+    """
+    match_counts = []
+    margin = 20
+
+    for k in range(3):
+        color = GROUP_COLORS[k]
+        i2d_group = inter_2d[k] if k < len(inter_2d) else []
+        i3d_group = inter_3d[k] if k < len(inter_3d) else []
+        pairs = matched_pairs[k] if k < len(matched_pairs) else []
+        match_counts.append(len(pairs))
+
+        # Draw 2D intersection points (open circles)
+        i2d_pixels = {}
+        for pi, pt in enumerate(i2d_group):
+            pt = np.asarray(pt, dtype=float)
+            uv = sphere_to_crop_pixel(pt, R_crop)
+            if uv is not None and pixel_in_bounds(uv[0], uv[1], margin):
+                i2d_pixels[pi] = uv
+                cv2.circle(img, uv, 6, color, 2, cv2.LINE_AA)
+
+        # Draw 3D intersection points (filled circles)
+        i3d_pixels = {}
+        for pi, pt in enumerate(i3d_group):
+            pt = np.asarray(pt, dtype=float)
+            uv = world_to_crop_pixel(pt, R_pano, t, R_crop)
+            if uv is not None and pixel_in_bounds(uv[0], uv[1], margin):
+                i3d_pixels[pi] = uv
+                cv2.circle(img, uv, 4, color, -1, cv2.LINE_AA)
+
+        # Draw connecting lines for matched pairs
+        for pair in pairs:
+            i2_idx, i3_idx = int(pair[0]), int(pair[1])
+            if i2_idx in i2d_pixels and i3_idx in i3d_pixels:
+                cv2.line(img, i2d_pixels[i2_idx], i3d_pixels[i3_idx],
+                         color, 1, cv2.LINE_AA)
+
+    return "/".join(str(c) for c in match_counts)
+
 
 def add_legend(img, label, color):
     cv2.rectangle(img, (8, 8), (22, 22), color, -1)
     cv2.putText(img, label, (28, 21),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def add_legend_multi(img, items, y_start=8):
+    """Draw multiple legend items vertically."""
+    for i, (label, color, filled) in enumerate(items):
+        y = y_start + i * 22
+        if filled:
+            cv2.circle(img, (15, y + 7), 5, color, -1, cv2.LINE_AA)
+        else:
+            cv2.circle(img, (15, y + 7), 5, color, 2, cv2.LINE_AA)
+        cv2.putText(img, label, (28, y + 13),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
 
 # ============================================================
@@ -196,6 +257,17 @@ def main():
     R_pano = np.array(pose['rotation'])
     t      = np.array(pose['translation'])
     print(f"  R det={np.linalg.det(R_pano):.4f}  t={t}")
+
+    # Check for V2 intersection data
+    has_v2_data = all(key in pose for key in ('inter_2d', 'inter_3d', 'matched_pairs'))
+    if has_v2_data:
+        inter_2d = pose['inter_2d']       # list of 3 arrays
+        inter_3d = pose['inter_3d']       # list of 3 arrays
+        matched_pairs = pose['matched_pairs']  # list of 3 arrays
+        print(f"  V2 data found: inter_2d groups={[len(g) for g in inter_2d]}, "
+              f"matched_pairs={[len(g) for g in matched_pairs]}")
+    else:
+        print("  No V2 intersection data — using legacy 2-panel layout")
 
     # --- Load 2D lines ---
     print("Loading extracted_2d_lines.json...")
@@ -225,25 +297,48 @@ def main():
         else:
             base = np.zeros((CROP_H, CROP_W, 3), dtype=np.uint8)
 
-        # --- Left panel: photo + 2D lines ---
-        left = base.copy()
-        draw_2d_lines(left, seg_list)
-        add_legend(left, f"2D lines ({len(seg_list)})", COLOR_2D)
+        if has_v2_data:
+            # --- V2 layout: [line overlay | matched intersections] ---
 
-        # --- Right panel: photo + projected 3D wireframe ---
-        right = base.copy()
-        draw_3d_wireframe(right, wireframe_segs, R_pano, t, R_crop)
-        add_legend(right, f"3D projected ({len(wireframe_segs)} segs)", COLOR_3D)
+            # Left panel: 2D lines (green thick) + 3D wireframe (cyan thin) on same image
+            left = base.copy()
+            draw_2d_lines(left, seg_list, COLOR_2D, thickness=2)
+            draw_3d_wireframe(left, wireframe_segs, R_pano, t, R_crop, COLOR_3D, thickness=1)
+            add_legend(left, f"2D(green) + 3D(cyan)", (200, 200, 200))
+
+            # Right panel: matched intersection pairs
+            right = base.copy()
+            match_str = draw_intersection_panel(
+                right, R_pano, t, R_crop, inter_2d, inter_3d, matched_pairs)
+            add_legend_multi(right, [
+                ("2D inter (open)", GROUP_COLORS[0], False),
+                ("3D inter (filled)", GROUP_COLORS[0], True),
+                ("grp0/1/2", (200, 200, 200), False),
+            ])
+
+        else:
+            # --- Legacy layout: [2D lines | 3D wireframe] ---
+            left = base.copy()
+            draw_2d_lines(left, seg_list, COLOR_2D, thickness=2)
+            add_legend(left, f"2D lines ({len(seg_list)})", COLOR_2D)
+
+            right = base.copy()
+            draw_3d_wireframe(right, wireframe_segs, R_pano, t, R_crop, COLOR_3D, thickness=2)
+            add_legend(right, f"3D projected ({len(wireframe_segs)} segs)", COLOR_3D)
+            match_str = ""
 
         # --- Compose side-by-side ---
-        divider = np.full((CROP_H, 4, 3), 200, dtype=np.uint8)   # light grey divider
+        divider = np.full((CROP_H, 4, 3), 200, dtype=np.uint8)
         panel   = np.hstack([left, divider, right])
 
         # Title bar
         title_h  = 36
         title    = np.zeros((title_h, panel.shape[1], 3), dtype=np.uint8)
         stem     = filename.replace('.jpg', '').replace('.png', '')
-        cv2.putText(title, stem, (10, 25),
+        title_text = stem
+        if match_str:
+            title_text += f"  matches: {match_str}"
+        cv2.putText(title, title_text, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (220, 220, 220), 2, cv2.LINE_AA)
         out_img = np.vstack([title, panel])
 
@@ -251,9 +346,13 @@ def main():
         cv2.imwrite(str(out_path), out_img)
         n_saved += 1
 
-    print(f"\nSaved {n_saved} comparison images → {output_dir}")
-    print("Left panel  = extracted 2D lines (green)")
-    print("Right panel = projected 3D wireframe segments (cyan) from estimated pose")
+    print(f"\nSaved {n_saved} comparison images -> {output_dir}")
+    if has_v2_data:
+        print("Left panel  = 2D lines (green) + projected 3D wireframe (cyan)")
+        print("Right panel = matched intersection pairs (colored by group)")
+    else:
+        print("Left panel  = extracted 2D lines (green)")
+        print("Right panel = projected 3D wireframe segments (cyan)")
 
 
 if __name__ == "__main__":
