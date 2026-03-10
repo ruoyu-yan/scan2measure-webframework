@@ -131,8 +131,7 @@ def extract_3d_wireframe(points, output_dir, distance_threshold=0.05, ransac_n=3
             debug_colored_pcds.append(cluster_pcd)
             
             cluster_centroid = np.mean(cluster_points, axis=0)
-            d = -np.dot(normal, cluster_centroid)
-            cluster_plane_eq = np.array([normal[0], normal[1], normal[2], d])
+            cluster_plane_eq = np.array(plane_model)
             
             plane_data = {
                 'plane_model': cluster_plane_eq,           

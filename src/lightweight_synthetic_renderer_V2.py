@@ -231,6 +231,7 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
 
     # Channel B: Plane Intersections (Loaded from Pickle)
     normal_edges = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
+    id_buffer = np.zeros((IMG_H, IMG_W), dtype=np.int32)
     
     if wireframe_segments is not None and len(wireframe_segments) > 0:
         def transform_point_to_camera(point_3d, cam_pose, total_yaw_rad, pitch_rad):
@@ -268,7 +269,7 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
         total_yaw_rad_seg = np.radians(-(rotation_deg + view_yaw))
         pitch_rad_seg = np.radians(-view_pitch)
         
-        for seg in wireframe_segments:
+        for seg_idx, seg in enumerate(wireframe_segments):
             start_3d = seg['start']
             end_3d   = seg['end']
             pi_a     = seg['plane_i']
@@ -343,6 +344,7 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
                     segment_has_visible_parts = True
                     if prev_visible and prev_px is not None:
                         cv2.line(normal_edges, prev_px, cur_px, 255, thickness=1)
+                        cv2.line(id_buffer, prev_px, cur_px, seg_idx + 1, thickness=1)
                     prev_px = cur_px
                     prev_visible = True
                 else:
@@ -355,12 +357,124 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
                     "start": start_3d.tolist(),
                     "end": end_3d.tolist()
                 })
+    
+    # Morphological clustering to consolidate parallel lines
+    dilate_kernel = np.ones((5, 5), dtype=np.uint8)
+    dilated_edges = cv2.dilate(normal_edges, dilate_kernel, iterations=2)
+    num_labels, labels = cv2.connectedComponents(dilated_edges)
+    
+    consolidated_3d_lines = []
+    
+    for label in range(1, num_labels):  # Skip 0 (background)
+        # Create boolean mask for this connected component
+        label_mask = (labels == label)
+        
+        # Extract segment indices from id_buffer using the mask
+        id_values = id_buffer[label_mask]
+        unique_seg_indices = np.unique(id_values)
+        unique_seg_indices = unique_seg_indices[unique_seg_indices != 0] - 1  # Remove 0 and recover original indices
+        
+        if len(unique_seg_indices) == 0:
+            continue
+        
+        # Fetch original 3D start and end points for all segment indices
+        seg_starts = []
+        seg_ends = []
+        for idx in unique_seg_indices:
+            seg_data = wireframe_segments[idx]
+            seg_starts.append(np.array(seg_data['start']))
+            seg_ends.append(np.array(seg_data['end']))
+        
+        # Calculate average 3D direction vector (align vectors before averaging)
+        directions = []
+        reference_dir = None
+        for s, e in zip(seg_starts, seg_ends):
+            d = e - s
+            norm = np.linalg.norm(d)
+            if norm > 1e-8:
+                d = d / norm
+                if reference_dir is None:
+                    reference_dir = d
+                # Align direction with reference (flip if pointing opposite)
+                if np.dot(d, reference_dir) < 0:
+                    d = -d
+                directions.append(d)
+        
+        if len(directions) == 0:
+            continue
+        
+        avg_direction = np.mean(directions, axis=0)
+        avg_direction_norm = np.linalg.norm(avg_direction)
+        if avg_direction_norm < 1e-8:
+            continue
+        avg_direction = avg_direction / avg_direction_norm
+        
+        # Use start point of first segment as local origin
+        local_origin = seg_starts[0]
+        
+        # Project all start and end points onto the average direction to find t values
+        t_values = []
+        for s, e in zip(seg_starts, seg_ends):
+            t_s = np.dot(s - local_origin, avg_direction)
+            t_e = np.dot(e - local_origin, avg_direction)
+            t_values.extend([t_s, t_e])
+        
+        # Find min and max t values
+        t_min = min(t_values)
+        t_max = max(t_values)
+        
+        # Calculate unified 3D start and end points
+        unified_start = local_origin + t_min * avg_direction
+        unified_end = local_origin + t_max * avg_direction
+        
+        consolidated_3d_lines.append({
+            "start": unified_start.tolist(),
+            "end": unified_end.tolist()
+        })
+    
+    # Project consolidated 3D lines back onto the 2D canvas
+    normal_edges = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
+    
+    for line_dict in consolidated_3d_lines:
+        start_3d = np.array(line_dict['start'])
+        end_3d = np.array(line_dict['end'])
+        
+        # Transform to camera space
+        start_cam = transform_point_to_camera(start_3d, camera_pose_global, total_yaw_rad_seg, pitch_rad_seg)
+        end_cam = transform_point_to_camera(end_3d, camera_pose_global, total_yaw_rad_seg, pitch_rad_seg)
+        
+        # Near-plane clipping check
+        near_clip = 0.1
+        if start_cam[2] <= near_clip and end_cam[2] <= near_clip:
+            continue
+        
+        if start_cam[2] <= near_clip or end_cam[2] <= near_clip:
+            direction = end_cam - start_cam
+            if abs(direction[2]) > 1e-8:
+                t_clip = (near_clip - start_cam[2]) / direction[2]
+                clipped_point = start_cam + t_clip * direction
+                if start_cam[2] <= near_clip:
+                    start_cam = clipped_point
+                else:
+                    end_cam = clipped_point
+        
+        # Project to 2D
+        start_2d = project_to_2d(start_cam)
+        end_2d = project_to_2d(end_cam)
+        
+        if start_2d is None or end_2d is None:
+            continue
+        
+        # Convert to integer pixel coordinates and draw
+        pt1 = (int(round(start_2d[0])), int(round(start_2d[1])))
+        pt2 = (int(round(end_2d[0])), int(round(end_2d[1])))
+        cv2.line(normal_edges, pt1, pt2, 255, thickness=1)
         
     edges_filtered = filter_short_edges(edges_geometry_filtered, min_size=60)
     normal_edges_filtered = filter_short_edges(normal_edges, min_size=60)
     combined_wireframe = cv2.bitwise_or(edges_filtered, normal_edges_filtered)
     
-    return edges, depth_vis, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe, visible_3d_lines
+    return edges, depth_vis, normal_edges, edges_filtered, normal_edges_filtered, combined_wireframe, consolidated_3d_lines
 
 # ==========================================
 # 4. MAIN PIPELINE
