@@ -79,22 +79,89 @@ def filter_short_edges(binary_image, min_size):
     return output
 
 
-def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n=3, num_iterations=1000, min_inliers=500, parallel_threshold=0.9):
+def filter_jagged_edges(binary_image, min_length=60, epsilon=3.0, max_density=0.10, max_wobble=0.15):
+    """
+    Enhanced filter that separates structural lines from 'squiggle' noise 
+    using angular analysis.
+    """
+    output = np.zeros_like(binary_image)
+    contours, _ = cv2.findContours(binary_image, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    
+    for contour in contours:
+        perimeter = cv2.arcLength(contour, closed=False)
+        if perimeter < min_length:
+            continue
+
+        # --- METRIC 1: Raw Vertex Density (The Roughness Check) ---
+        # We use a very strict approximation just to count the "real" directional changes
+        # epsilon=1.0 ensures we capture the zigs and zags of the noise
+        raw_approx = cv2.approxPolyDP(contour, epsilon=1.0, closed=False)
+        raw_density = len(raw_approx) / perimeter
+        
+        # --- METRIC 2: Directional "Wobble" (The Squiggle Check) ---
+        # Calculate the sum of absolute angular changes along the path
+        # Smooth curves have low accumulated angle per pixel.
+        # Squiggly noise has high accumulated angle per pixel.
+        total_angle_change = 0
+        if len(raw_approx) > 2:
+            pts = raw_approx[:, 0, :]
+            # Vectors between consecutive points
+            vecs = pts[1:] - pts[:-1]
+            # Normalize vectors
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            # Avoid division by zero
+            valid_vecs = vecs / (norms + 1e-6)
+            
+            # Dot product of consecutive vectors (v1 . v2)
+            # Clip to [-1, 1] to avoid float errors in arccos
+            dots = np.sum(valid_vecs[:-1] * valid_vecs[1:], axis=1)
+            dots = np.clip(dots, -1.0, 1.0)
+            
+            # Angles in radians
+            angles = np.arccos(dots)
+            total_angle_change = np.sum(angles)
+
+        # "Wobble" = average turning angle per unit length
+        # Normal straight lines/smooth curves are < 0.1
+        # Chaotic squiggles are often > 0.2
+        wobble_metric = total_angle_change / perimeter
+
+        # --- DECISION LOGIC ---
+        is_structure = True
+        
+        # Filter 1: Is it too rough? (Too many vertices for its length)
+        if raw_density > max_density:
+            is_structure = False
+            
+        # Filter 2: Is it too squiggly? (Direction changes too chaotically)
+        if wobble_metric > max_wobble:
+            is_structure = False
+
+        if is_structure:
+            # Draw the simplified version (clean look)
+            final_approx = cv2.approxPolyDP(contour, epsilon, closed=False)
+            cv2.drawContours(output, [final_approx], -1, 255, thickness=1)
+            
+    return output
+
+
+def extract_3d_wireframe(points, output_dir, num_planes=6, distance_threshold=0.05, ransac_n=3, num_iterations=1000, min_inliers=500, parallel_threshold=0.9):
     """
     Extracts a 3D wireframe by finding plane intersections using RANSAC.
+    Also exports a color-coded point cloud to visualize the detected planes.
     
     Args:
         points: (N, 3) numpy array of point cloud
-        num_planes: Number of dominant planes to detect (e.g., 6 for walls/floor/ceiling)
-        distance_threshold: RANSAC distance threshold for inlier classification
-        ransac_n: Number of points to sample for RANSAC
+        output_dir: Path object where debug PLY will be saved
+        num_planes: Number of dominant planes to detect
+        distance_threshold: RANSAC distance threshold
+        ransac_n: Number of points to sample
         num_iterations: Number of RANSAC iterations
         min_inliers: Minimum number of inliers for a valid plane
-        parallel_threshold: Dot product threshold to consider planes parallel (skip intersection)
+        parallel_threshold: Dot product threshold to consider planes parallel
     
     Returns:
         List of 3D line segments as tuples: [(start_point, end_point), ...]
-        Each point is a numpy array of shape (3,)
     """
     print(f"\n[Wireframe Extraction] Starting RANSAC plane segmentation...")
     
@@ -103,10 +170,19 @@ def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n
     pcd.points = o3d.utility.Vector3dVector(points)
     
     # Store detected planes: list of (plane_eq, inlier_points)
-    # plane_eq = [a, b, c, d] where ax + by + cz + d = 0
     detected_planes = []
     remaining_pcd = pcd
     
+    # --- VISUALIZATION SETUP ---
+    debug_colored_pcds = []
+    # Distinct colors for up to 6 planes (RGB 0-1 range)
+    # Red, Green, Blue, Yellow, Cyan, Magenta
+    plane_colors = [
+        [1, 0, 0], [0, 1, 0], [0, 0, 1], 
+        [1, 1, 0], [0, 1, 1], [1, 0, 1]
+    ]
+    # ---------------------------
+
     for i in range(num_planes):
         if len(remaining_pcd.points) < min_inliers:
             print(f"  [Info] Stopping early: only {len(remaining_pcd.points)} points remaining")
@@ -127,6 +203,13 @@ def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n
         inlier_pcd = remaining_pcd.select_by_index(inlier_indices)
         inlier_points = np.asarray(inlier_pcd.points)
         
+        # --- VISUALIZATION STEP ---
+        # Paint this plane a distinct color
+        color = plane_colors[i % len(plane_colors)]
+        inlier_pcd.paint_uniform_color(color)
+        debug_colored_pcds.append(inlier_pcd)
+        # --------------------------
+
         # Store plane equation and inliers
         detected_planes.append((np.array(plane_model), inlier_points))
         
@@ -138,6 +221,22 @@ def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n
         remaining_pcd = remaining_pcd.select_by_index(inlier_indices, invert=True)
     
     print(f"  Detected {len(detected_planes)} planes")
+
+    # --- SAVE DEBUG POINT CLOUD ---
+    print("  [Debug] Saving RANSAC visualization...")
+    # Paint remaining noise points Grey
+    remaining_pcd.paint_uniform_color([0.5, 0.5, 0.5])
+    debug_colored_pcds.append(remaining_pcd)
+    
+    # Combine all clouds
+    combined_pcd = o3d.geometry.PointCloud()
+    for p in debug_colored_pcds:
+        combined_pcd += p
+        
+    debug_ply_path = output_dir / "debug_ransac_planes.ply"
+    o3d.io.write_point_cloud(str(debug_ply_path), combined_pcd)
+    print(f"  [Debug] Saved to: {debug_ply_path}")
+    # ------------------------------
     
     # Find plane-plane intersections
     wireframe_segments = []
@@ -156,43 +255,31 @@ def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n
             # Check if planes are parallel
             dot_product = abs(np.dot(n1, n2))
             if dot_product > parallel_threshold:
-                # Planes are nearly parallel, skip
                 continue
             
-            # Compute intersection line direction (cross product of normals)
+            # Compute intersection line direction
             line_dir = np.cross(n1, n2)
-            line_dir = line_dir / (np.linalg.norm(line_dir) + 1e-8)  # Normalize
+            line_dir = line_dir / (np.linalg.norm(line_dir) + 1e-8)
             
             # Find a point on the intersection line
-            # Solve the system: n1 · p = -d1, n2 · p = -d2
-            # We fix one coordinate and solve for the other two
             d1, d2 = plane1_eq[3], plane2_eq[3]
-            
-            # Find which axis to fix (use the one with smallest line_dir component)
             fix_axis = np.argmin(np.abs(line_dir))
-            
-            # Build 2x2 system for the other two axes
             axes = [k for k in range(3) if k != fix_axis]
             A = np.array([[n1[axes[0]], n1[axes[1]]],
                           [n2[axes[0]], n2[axes[1]]]])
-            b = np.array([-d1 - n1[fix_axis] * 0, -d2 - n2[fix_axis] * 0])  # Assuming fixed axis = 0
+            b = np.array([-d1, -d2])
             
-            # Check if system is solvable
             if abs(np.linalg.det(A)) < 1e-8:
                 continue
             
             solution = np.linalg.solve(A, b)
             
-            # Construct point on line
             point_on_line = np.zeros(3)
-            point_on_line[fix_axis] = 0
             point_on_line[axes[0]] = solution[0]
             point_on_line[axes[1]] = solution[1]
             
-            # Project inlier points from both planes onto the intersection line
-            # to find the parameter intervals covered by each plane
+            # Project inlier points to line to find intervals
             def project_to_line(points, line_point, line_direction):
-                """Project points onto a line and return parameter values."""
                 vecs = points - line_point
                 t_values = np.dot(vecs, line_direction)
                 return t_values
@@ -200,31 +287,25 @@ def extract_3d_wireframe(points, num_planes=6, distance_threshold=0.05, ransac_n
             t1_values = project_to_line(plane1_pts, point_on_line, line_dir)
             t2_values = project_to_line(plane2_pts, point_on_line, line_dir)
             
-            # Find intervals
             t1_min, t1_max = np.min(t1_values), np.max(t1_values)
             t2_min, t2_max = np.min(t2_values), np.max(t2_values)
             
-            # Find intersection of intervals
             t_overlap_min = max(t1_min, t2_min)
             t_overlap_max = min(t1_max, t2_max)
             
-            # Check if there's a valid overlap
             if t_overlap_max <= t_overlap_min:
                 continue
             
-            # Skip very short segments (noise)
             segment_length = t_overlap_max - t_overlap_min
-            if segment_length < 0.1:  # Minimum 10cm segment
+            if segment_length < 0.1:
                 continue
             
-            # Generate 3D line segment endpoints
             start_point = point_on_line + t_overlap_min * line_dir
             end_point = point_on_line + t_overlap_max * line_dir
             
             wireframe_segments.append((start_point, end_point))
     
     print(f"  Found {len(wireframe_segments)} wireframe segments")
-    
     return wireframe_segments
 
 def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_yaw=0, view_pitch=0, wireframe_segments=None):
@@ -345,6 +426,10 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
     # Use Canny to find depth discontinuities
     edges = cv2.Canny(depth_denoised, 50, 150)
     
+    # 10b. Channel A Geometric Filtering: Remove jagged/high-tortuosity edges
+    # This removes squiggly noise while preserving smooth structural lines
+    edges_geometry_filtered = filter_jagged_edges(edges, min_length=60, epsilon=3.0, max_density=0.1)
+
     # 11. Channel B: Geometry-based Wireframe via Plane Intersection
     # Project 3D wireframe segments onto the 2D image plane
     normal_edges = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
@@ -443,8 +528,8 @@ def render_synthetic_wireframe(points, camera_pose_global, rotation_deg, view_ya
             cv2.line(normal_edges, (u1, v1), (u2, v2), 255, thickness=1)
     
     # 12. Geometric Filtering: Remove short/noisy edge segments from both channels
-    # Filter Channel A (depth edges) with min_size of 60 pixels
-    edges_filtered = filter_short_edges(edges, min_size=60)
+    # Filter Channel A (geometry-filtered depth edges) with min_size of 60 pixels
+    edges_filtered = filter_short_edges(edges_geometry_filtered, min_size=60)
     
     # Filter Channel B (normal edges) with min_size of 60 pixels
     normal_edges_filtered = filter_short_edges(normal_edges, min_size=60)
@@ -542,9 +627,13 @@ def main():
     print(f"\nComputed Camera Pose: {final_pose}")
     print(f"Room Orientation: {yaw_deg} deg")
     
+    # Define the base output folder (e.g. .../debug_renderer/Area_3_study_no_RGB)
+    output_base_dir = project_root / "data" / "debug_renderer" / point_cloud_name
+    
     # 4. Extract 3D Wireframe from Point Cloud (Plane Intersections)
     wireframe_segments = extract_3d_wireframe(
         points,
+        output_dir=output_base_dir,  # <--- NEW ARGUMENT ADDED HERE
         num_planes=6,
         distance_threshold=0.05,
         ransac_n=3,

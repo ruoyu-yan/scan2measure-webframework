@@ -215,8 +215,8 @@ def align_polygons(target_poly, source_poly, force_scale=None, asymmetric_mode=F
 def main():
     # --- USER CONFIGURATION: FOLDER NAMES ---
     # Change these variables to switch between datasets
-    rf_folder_name = "Area_3_selected_rooms_subset_big"
-    lgt_folders = ["Area3_study", "Area_3_office2", "Area3_small_office", "Area3_corridor_short"]
+    rf_folder_name = "tmb_office_one_corridor"
+    lgt_folders = ["TMB_office1", "TMB_corridor_south2", "TMB_corridor_south1"]
     
     # --- PATH CONSTRUCTION ---
     rf_path = ROOMFORMER_BASE / rf_folder_name / "predictions.json"

@@ -911,10 +911,10 @@ def main():
     print("--- Testing Synthetic Point Cloud Renderer ---")
     
     # 1. Paths
-    pcd_path = project_root / "data" / "raw_point_cloud" / "tmb_office_one_corridor.ply"
-    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "tmb_office_one_corridor" / "global_alignment.json"
+    pcd_path = project_root / "data" / "raw_point_cloud" / "tmb_office_one_corridor_dense.ply"
+    json_path = project_root / "data" / "reconstructed_floorplans_RoomFormer" / "tmb_office_one_corridor_dense" / "global_alignment.json"
     # Assuming metadata is here based on generate_density_image structure
-    meta_path = project_root / "data" / "density_image" / "tmb_office_one_corridor" / "metadata.json"
+    meta_path = project_root / "data" / "density_image" / "tmb_office_one_corridor_dense" / "metadata.json"
     
     target_room = "TMB_office1"
 
@@ -932,17 +932,26 @@ def main():
     output_dir_combined.mkdir(parents=True, exist_ok=True)
 
     # 2. Load Data
-    print(f"Loading Point Cloud: {pcd_path.name}")
-    pcd = o3d.io.read_point_cloud(str(pcd_path))
-    points = np.asarray(pcd.points)
-    
-    print(f"Point Cloud Bounds:")
-    print(f"  Min: {pcd.get_min_bound()}")
-    print(f"  Max: {pcd.get_max_bound()}")
-    
     print("Loading Metadata & Alignment...")
     with open(meta_path) as f: meta = json.load(f)
     with open(json_path) as f: align = json.load(f)
+
+    # Extract the cumulative rotation and translation saved by generate_density_image.py
+    rotation_matrix = np.array(meta['rotation_matrix'])  # 3x3
+    translation = np.array(meta['translation'])           # 3-vector
+
+    print(f"Loading Point Cloud: {pcd_path.name}")
+    pcd = o3d.io.read_point_cloud(str(pcd_path))
+
+    # Apply the same alignment transforms used during density map generation
+    # so the point cloud is in the exact same coordinate system.
+    pcd.rotate(rotation_matrix, center=(0, 0, 0))
+
+    points = np.asarray(pcd.points)
+    
+    print(f"Point Cloud Bounds (after alignment):")
+    print(f"  Min: {pcd.get_min_bound()}")
+    print(f"  Max: {pcd.get_max_bound()}")
     
     # Extract Room Info
     
@@ -966,13 +975,12 @@ def main():
     scale_factor = max_dim / img_width
     
     # Compute absolute world X coordinate
-    # X = min_coords[0] + (pixel_u * scale_factor) - offset[0]
-    cam_x = min_coords[0] + (pose_px[0] * scale_factor) - offset[0]
-    
+    # Try removing - offset[0]
+    cam_x = min_coords[0] + (pose_px[0] * scale_factor) 
+
     # Compute absolute world Y coordinate
-    # Y = min_coords[1] + max_dim - (pixel_v * scale_factor) - offset[1]
-    # This handles inversion between top-down image coords and bottom-up world coords
-    cam_y = min_coords[1] + max_dim - (pose_px[1] * scale_factor) - offset[1]
+    # Try removing - offset[1]
+    cam_y = min_coords[1] + max_dim - (pose_px[1] * scale_factor)
     
     pose_world_xy = np.array([cam_x, cam_y])
     
