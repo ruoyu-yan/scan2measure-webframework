@@ -26,8 +26,9 @@ from line_analysis import extract_vanishing_points, classify_lines, find_interse
 from sphere_geometry import render_sphere_lines
 
 # ── Config ──────────────────────────────────────────────────────────────────
-ROOM_NAME = "TMB_office1"
+ROOM_NAME = "TMB_corridor_south1"
 PANO_RESOLUTION = (512, 1024)
+ELEV_MASK_DEG = 30  # discard lines whose midpoint is within this many degrees of either pole
 
 ROOT = Path(__file__).resolve().parent.parent
 PANO_PATH = ROOT / "data" / "pano" / "raw" / f"{ROOM_NAME}.jpg"
@@ -44,10 +45,21 @@ def main():
     img = cv2.resize(img, (PANO_RESOLUTION[1], PANO_RESOLUTION[0]))
     print(f"Loaded panorama: {img.shape}")
 
-    # 2. Detect lines
+    # 2. Detect lines + elevation mask (discard near-pole lines)
     lines_np = detect_pano_lines(img)
+    n_raw = lines_np.shape[0]
+    starts = lines_np[:, 3:6]
+    ends = lines_np[:, 6:9]
+    starts_n = starts / np.linalg.norm(starts, axis=1, keepdims=True)
+    ends_n = ends / np.linalg.norm(ends, axis=1, keepdims=True)
+    midpoints = starts_n + ends_n
+    midpoints = midpoints / np.linalg.norm(midpoints, axis=1, keepdims=True)
+    elev_deg = np.degrees(np.arcsin(np.clip(midpoints[:, 2], -1, 1)))
+    keep = np.abs(elev_deg) < (90 - ELEV_MASK_DEG)
+    lines_np = lines_np[keep]
     lines = torch.from_numpy(lines_np).float()
-    print(f"Detected {lines.shape[0]} lines")
+    print(f"Detected {n_raw} lines, kept {lines.shape[0]} after "
+          f"elevation mask ({ELEV_MASK_DEG}° from poles)")
 
     # 3. Extract vanishing points
     principal_2d = extract_vanishing_points(lines)

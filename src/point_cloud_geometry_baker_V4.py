@@ -19,7 +19,7 @@ import open3d as o3d
 # ============================================================
 # CONFIGURATION
 # ============================================================
-POINT_CLOUD_NAME = "tmb_office1"   # input PLY name (without .ply) and output folder name
+POINT_CLOUD_NAME = "tmb_office_one_corridor_dense"   # input PLY name (without .ply) and output folder name
 KNN              = 20              # k neighbours passed to 3DLineDetection
 
 # ============================================================

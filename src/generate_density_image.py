@@ -158,7 +158,7 @@ def generate_density(point_cloud, width=256, height=256):
 # -------------------------------------------------------------------------
 def main():
     # --- CONFIGURATION ---
-    FILENAME = "tmb_office_one_corridor_dense.ply"
+    FILENAME = "tmb_office1_subsampled.ply"
     # ---------------------
 
     input_path = input_dir / FILENAME

@@ -174,7 +174,7 @@ def main():
     device = torch.device(args.device)
 
     # Hard-coded single image inference (edit this filename as needed)
-    target_image_name = "Area_3_selected_rooms_no_RGB.png"
+    target_image_name = "tmb_office1_subsampled.png"
     
     print(f"--- RoomFormer Inference ---")
     print(f"Input:  {args.input_dir}")
