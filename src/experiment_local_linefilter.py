@@ -28,7 +28,7 @@ from pose_search import (
     xdf_coarse_search_from_precomputed,
 )
 from pose_refine import refine_pose
-from visualize_pose import render_side_by_side
+from visualize_pose import render_side_by_side, render_reprojection, render_topdown
 from line_analysis import classify_lines
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -56,6 +56,9 @@ ROOT = Path(__file__).resolve().parent.parent
 PKL_3D_PATH = ROOT / "data" / "debug_renderer" / POINT_CLOUD_NAME / "3d_line_map.pkl"
 ALIGNMENT_PATH = ROOT / "data" / "reconstructed_floorplans_RoomFormer" / POINT_CLOUD_NAME / "global_alignment.json"
 METADATA_PATH = ROOT / "data" / "density_image" / POINT_CLOUD_NAME / "metadata.json"
+PC_PATH = ROOT / "data" / "raw_point_cloud" / f"{POINT_CLOUD_NAME}.ply"
+DENSITY_IMG_PATH = ROOT / "data" / "density_image" / POINT_CLOUD_NAME / f"{POINT_CLOUD_NAME}.png"
+ROOMFORMER_PATH = ROOT / "data" / "reconstructed_floorplans_RoomFormer" / POINT_CLOUD_NAME / "predictions.json"
 OUTPUT_BASE = ROOT / "data" / "pose_estimates" / "multiroom"
 
 
@@ -185,6 +188,27 @@ def main():
         ns = (voronoi_sparse == pi).sum()
         ni = (voronoi_inter == pi).sum()
         print(f"    {name}: dense={nd}, sparse={ns}, inter={ni}")
+
+    # ── A5: Load visualization data ───────────────────────────────────
+    print("\n[A5] Loading visualization data (point cloud, density image, polygons)...")
+    import open3d as o3d
+    pcd = o3d.io.read_point_cloud(str(PC_PATH))
+    pc_pts = np.asarray(pcd.points)
+    rng = np.random.default_rng(42)
+    if pc_pts.shape[0] > 50000:
+        pc_pts = pc_pts[rng.choice(pc_pts.shape[0], 50000, replace=False)]
+    print(f"    Point cloud: {pc_pts.shape[0]} points (subsampled)")
+
+    density_img = cv2.imread(str(DENSITY_IMG_PATH), cv2.IMREAD_GRAYSCALE)
+    with open(METADATA_PATH) as f:
+        density_meta = json.load(f)
+
+    room_polygons = None
+    if ROOMFORMER_PATH.exists():
+        with open(ROOMFORMER_PATH) as f:
+            room_polygons = json.load(f)
+    print(f"    Density image: {density_img.shape}")
+    print(f"    RoomFormer polygons: {len(room_polygons) if room_polygons else 0}")
 
     # ================================================================
     # PHASE B: Per-panorama pose estimation
@@ -360,23 +384,35 @@ def main():
         }
 
         # ── B9: Visualization ─────────────────────────────────────────
-        # Use FULL sparse lines so the complete wireframe is visible for context
-        print("\n[B9] Generating side_by_side.png...")
+        print("\n[B9] Generating visualizations...")
         pano_img = cv2.imread(str(pano_img_path))
         if pano_img is not None:
             pano_img = cv2.cvtColor(pano_img, cv2.COLOR_BGR2RGB)
+            vis_dir = OUTPUT_BASE / "local_filter_vis" / pano_name
+            vis_dir.mkdir(parents=True, exist_ok=True)
+
+            # side_by_side.png — use FULL sparse lines for context
             starts_np = starts_sparse.cpu().numpy()
             ends_np = ends_sparse.cpu().numpy()
-
             sbs = render_side_by_side(
                 pano_img, edge_2d, starts_np, ends_np,
                 final_R, final_t, resolution=(512, 1024))
-
-            vis_dir = OUTPUT_BASE / "local_filter_vis" / pano_name
-            vis_dir.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(vis_dir / "side_by_side.png"),
                         cv2.cvtColor(sbs, cv2.COLOR_RGB2BGR))
             print(f"    Saved {vis_dir / 'side_by_side.png'}")
+
+            # reprojection.png — point cloud depth overlay
+            reproj = render_reprojection(pano_img, pc_pts, final_R, final_t)
+            cv2.imwrite(str(vis_dir / "reprojection.png"),
+                        cv2.cvtColor(reproj, cv2.COLOR_RGB2BGR))
+            print(f"    Saved {vis_dir / 'reprojection.png'}")
+
+            # topdown.png — camera on density image + floorplan
+            topdown = render_topdown(density_img, density_meta, final_t, final_R,
+                                     room_polygons=room_polygons)
+            cv2.imwrite(str(vis_dir / "topdown.png"),
+                        cv2.cvtColor(topdown, cv2.COLOR_RGB2BGR))
+            print(f"    Saved {vis_dir / 'topdown.png'}")
         else:
             print(f"    WARNING: could not load panorama from {pano_img_path}")
 
