@@ -58,13 +58,13 @@ python src/point_cloud_geometry_baker_V3.py      # Stage 3: Point cloud → 3D w
 python src/lightweight_synthetic_renderer_V2.py  # Stage 4a: 3D wireframe → synthetic views
 python src/pano_processing_virtual_camerasV2.py  # Stage 4b: Panorama → 22 perspective crops
 python src/image_feature_extraction.py           # Stage 4c: Perspective crops → 2D line features
-python src/feature_matchingV2.py                 # Stage 5: Camera pose estimation
+python src/pose_estimation_pipeline.py             # Stage 5: FGPL-faithful camera pose estimation
 python src/polygon_scale_calculation.py          # Stage 6: Compute pixel-to-meter scale
 ```
 
-Stage 5 alternatives:
-- `feature_matchingV2.py` — **preferred**. FGPL-faithful pipeline with canonical frame precomputation, XDF inlier-counting cost, vectorized intersections, and full R+t ICP refinement via `PnL_solver.refine_pose_full()`. Outputs V2 keys (`inter_2d`, `inter_3d`, `matched_pairs`) in `camera_pose.json`.
-- `feature_matching.py` — V1 (legacy). Simplified FGPL with translation-only ICP refinement via `PnL_solver.refine_pose_icp()`.
+Stage 5: `pose_estimation_pipeline.py` — canonical FGPL-faithful pose estimation. Modular 10-stage pipeline importing `xdf_distance.py`, `pose_search.py`, `pose_refine.py`, `visualize_pose.py`. Loads `3d_line_map.pkl` + `fgpl_features.json`, outputs `camera_pose.json` (V2 keys).
+- Archived: `feature_matchingV2.py` (monolithic, older V1 input format) → `Archive/`
+- Archived: `feature_matching.py` (V1 legacy) → `Archive/`
 
 Supporting scripts:
 ```bash
@@ -123,7 +123,7 @@ data/pano/<room>/  (panoramic images)
 
 === Pose estimation (both paths) ===
 
-feature_matchingV2.py + PnL_solver.py  (loads room_geometry.pkl + 2D features → camera_pose.json)
+pose_estimation_pipeline.py + pose_search.py + pose_refine.py + xdf_distance.py  (loads 3d_line_map.pkl + fgpl_features.json → camera_pose.json)
 visualize_matching.py  (loads camera_pose.json → 2-panel debug PNGs in data/pose_estimates/<room>/vis/)
 align_polygons_demo5.py + polygon_scale_calculation.py  (align floorplans, output scale)
 ```
@@ -142,9 +142,11 @@ align_polygons_demo5.py + polygon_scale_calculation.py  (align floorplans, outpu
 | `sphere_geometry.py` | Library: icosphere generation, equirectangular ↔ sphere projection, panoramic point/line rasterization |
 | `pano_line_detector.py` | Library: 26-view HorizonNet-style panorama decomposition, LSD detection, tangent-plane back-projection to sphere, 3-pass segment merging |
 | `line_analysis.py` | Library: icosphere voting for 3 vanishing points, line classification into principal groups, great-circle arc intersection finding |
-| `feature_matchingV2.py` | **Preferred**. 9-stage FGPL-faithful pipeline: load 3D wireframe → sphere back-project 2D lines → principal direction voting (icosphere) → 24 rotation candidates → vectorized 2D/3D intersections → translation grid with chamfer filtering → canonical-frame XDF inlier-counting cost → full R+t ICP refinement → camera_pose.json with V2 keys |
-| `feature_matching.py` | V1 legacy. 8-stage simplified FGPL: load lines → sphere back-project → principal direction voting → 24 rotation candidates → translation grid → XDF cost → translation-only ICP refinement → camera_pose.json |
-| `PnL_solver.py` | ICP-style pose refinement module (imported by feature_matching scripts, not run standalone). Contains `refine_pose_icp()` (V1: translation-only) and `refine_pose_full()` (V2: two-phase R+t with grouped mutual-NN matching) |
+| `pose_estimation_pipeline.py` | **Canonical**. Modular 10-stage FGPL-faithful pipeline: loads pre-computed `3d_line_map.pkl` + `fgpl_features.json` → 2D intersections → 24 rotation candidates → rearrange intersections → adaptive quantile translation grid → `single_pose_compute` XDF search → top-K=10 ICP refinement → quality-ranked selection → camera_pose.json (V2 keys) |
+| `xdf_distance.py` | Library: LDF/PDF sphere distance functions, 3D line classification, 2D intersection finding with line-pair index tracking |
+| `pose_search.py` | Library: 24 rotation candidates (SVD Procrustes), adaptive quantile translation grid, canonical-frame XDF coarse search with `single_pose_compute`, rotation diversity selection |
+| `pose_refine.py` | Library: two-phase sphere ICP refinement (Phase 1: translation via grouped mutual-NN + global fallback, Phase 2: rotation via YPR line direction alignment). Safety drift checks |
+| `PnL_solver.py` | Legacy ICP module (unused by active pipeline, kept for reference). Contains `refine_pose_icp()` (V1) and `refine_pose_full()` (V2) |
 | `align_polygons_demo5.py` | Hungarian algorithm polygon matching (RoomFormer 2D ↔ LGT-Net 3D) |
 | `polygon_scale_calculation.py` | Consensus scale estimation via histogram peak detection over pairwise polygon corner distances |
 | `visualize_matching.py` | 22 side-by-side PNGs per panorama. V2 layout: left = 2D lines (green) + projected 3D wireframe (cyan) overlay, right = matched intersection pairs colored by group. Falls back to V1 layout (separate 2D/3D panels) when V2 keys absent |
@@ -155,24 +157,25 @@ align_polygons_demo5.py + polygon_scale_calculation.py  (align floorplans, outpu
 | `ply_to_xyz.py` | Utility: convert PLY → plain-text XYZ (one point per line, used by 3DLineDetection) |
 | `test_FGPL_3d_feature.py` | Test script: converts OBJ → FGPL TXT, calls native `generate_line_map_single()` for principal direction voting + 3D intersection, prints stats + 3D visualization |
 
-### `feature_matchingV2.py` — FGPL-Faithful Pose Estimation
+### `pose_estimation_pipeline.py` — FGPL-Faithful Pose Estimation
 
-9-stage pipeline using PyTorch tensors throughout:
+Modular 10-stage pipeline using PyTorch tensors throughout:
 
-1. **Load 3D wireframe** — `room_geometry.pkl` → dirs, lengths, filter by min length
-2. **Load 2D lines** — `extracted_2d_lines.json` → pinhole inverse → sphere back-projection → `(N, 9)` tensor `[normal, start, end]`
-3. **Principal directions** — icosphere voting (level 5, ~2562 pts): argmax-bincount for 3D, great-circle membership for 2D. Ensures `det > 0`
-4. **24 rotation candidates** — 6 permutations × 4 det-preserving sign flips, SVD Procrustes alignment
-5. **Line intersections** — 2D: cross-product of great-circle normals + arc membership. 3D: closest-point formula + parametric test. 3 groups each
-6. **Translation candidates** — uniform 3D grid in wireframe bbox, chamfer-filtered (~1700 pts)
-7. **XDF coarse search** — canonical frame precomputation: LDF + PDF distance functions, inlier counting `|d_2d - d_3d| < 0.1`, shape `(N_t, N_r)` → top-K poses
-8. **Full ICP refinement** — `PnL_solver.refine_pose_full()`: Phase 1 = translation (100 iters), Phase 2 = rotation via YPR (50 iters)
-9. **Output** — `camera_pose.json`
+1. **Load 3D features** — `3d_line_map.pkl` → dense/sparse lines, principal_3d, pre-computed 3D intersections
+2. **Load 2D features** — `fgpl_features.json` → sphere-projected lines `(N, 9)`, principal_2d
+3. **2D intersections** — `xdf_distance.find_intersections_2d_indexed()`: cross-product + arc membership, with line-pair index tracking
+4. **24 rotation candidates** — `pose_search.build_rotation_candidates()`: 6 permutations × 4 det-preserving sign flips, SVD Procrustes
+5. **Rearrange intersections** — `pose_search.rearrange_intersections_for_rotations()`: remap 2D intersection groups per rotation permutation
+6. **Translation grid** — `pose_search.generate_translation_grid()`: adaptive quantile-based (~1700 pts), chamfer-filtered
+7. **XDF coarse search** — `pose_search.xdf_coarse_search()`: canonical frame precomputation, `single_pose_compute` LDF/PDF approximation, inlier counting `|d_2d - d_3d| < 0.1`, rotation-diverse top-K=10
+8. **ICP refinement** — `pose_refine.refine_pose()` on 10 candidates: Phase 1 = translation (100 iters), Phase 2 = rotation via YPR (50 iters). Quality ranking by `(-n_tight, avg_dist)`
+9. **Output** — `camera_pose.json` (V2 keys)
+10. **Visualization** — `visualize_pose.render_side_by_side()` → `side_by_side.png`
 
 Key configuration constants (top of file):
 - `VOTE_SPHERE_LEVEL = 5`, `QUERY_SPHERE_LEVEL = 3`
 - `XDF_INLIER_THRES = 0.1`, `POINT_GAMMA = 0.2`
-- `CHAMFER_MIN_DIST = 0.3`, `NUM_TRANS = 1700`
+- `CHAMFER_MIN_DIST = 0.3`, `NUM_TRANS = 1700`, `TOP_K = 10`
 
 ### `camera_pose.json` Output Format
 
@@ -183,7 +186,7 @@ Common keys (V1 + V2):
 - `n_inter_matched` — number of matched intersection pairs
 - `xdf_cost_coarse` — best coarse XDF cost
 
-V2-only keys (added by `feature_matchingV2.py`):
+V2-only keys (added by `pose_estimation_pipeline.py`):
 - `inter_2d` — list of 3 arrays, each `(M_k, 3)` — 2D intersection sphere points per group
 - `inter_3d` — list of 3 arrays, each `(N_k, 3)` — 3D intersection world points per group
 - `matched_pairs` — list of 3 arrays, each `(P_k, 2)` — mutual-NN index pairs `[i_2d, i_3d]` from ICP
