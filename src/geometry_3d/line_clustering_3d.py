@@ -10,7 +10,11 @@ All functions take/return torch tensors. No classes.
 """
 
 from pathlib import Path
+import sys
 import torch
+
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SRC_ROOT / "utils"))
 
 # Reuse existing icosphere code
 from sphere_geometry import generate_sphere_points

@@ -17,7 +17,11 @@ import cv2
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SRC_ROOT / "utils"))
+sys.path.insert(0, str(_SRC_ROOT / "pose_estimation"))
+sys.path.insert(0, str(_SRC_ROOT / "visualization"))
+sys.path.insert(0, str(_SRC_ROOT / "features_2d"))
 from sphere_geometry import generate_sphere_points
 from xdf_distance import find_intersections_2d_indexed
 from pose_search import (
@@ -52,7 +56,7 @@ CLASSIFY_THRES_2D = 0.5
 OVERLAP_MARGIN = 2.0  # meters, buffer beyond Voronoi boundary
 
 # Paths
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = _SRC_ROOT.parent
 PKL_3D_PATH = ROOT / "data" / "debug_renderer" / POINT_CLOUD_NAME / "3d_line_map.pkl"
 ALIGNMENT_PATH = ROOT / "data" / "reconstructed_floorplans_RoomFormer" / POINT_CLOUD_NAME / "global_alignment.json"
 METADATA_PATH = ROOT / "data" / "density_image" / POINT_CLOUD_NAME / "metadata.json"
@@ -381,6 +385,7 @@ def main():
             'n_sparse_lines': n_sparse,
             'n_intersections': n_inter,
             't': final_t.tolist(),
+            'R': final_R.tolist(),
         }
 
         # ── B9: Visualization ─────────────────────────────────────────

@@ -18,7 +18,9 @@ import cv2
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SRC_ROOT / "utils"))
+sys.path.insert(0, str(_SRC_ROOT / "visualization"))
 from sphere_geometry import generate_sphere_points
 from xdf_distance import find_intersections_2d_indexed
 from pose_search import (

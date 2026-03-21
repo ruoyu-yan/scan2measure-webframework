@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SRC_ROOT / "features_2d"))
 from line_analysis import classify_lines
 
 

@@ -2,7 +2,8 @@
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SRC_ROOT / "utils"))
 
 import torch
 from sphere_geometry import generate_sphere_points

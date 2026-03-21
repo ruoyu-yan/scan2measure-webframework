@@ -10,7 +10,8 @@ import cv2
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_SRC_ROOT / "utils"))
 from sphere_geometry import render_sphere_lines
 
 
