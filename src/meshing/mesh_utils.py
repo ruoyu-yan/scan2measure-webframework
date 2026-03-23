@@ -6,6 +6,8 @@ vertex color transfer, and quadric decimation.
 
 import numpy as np
 import open3d as o3d
+import xatlas
+from scipy.spatial import cKDTree
 
 
 def estimate_normals(pcd, knn=30, radius=0.1):
@@ -212,3 +214,157 @@ def merge_tile_meshes(meshes):
     merged.remove_degenerate_triangles()
     merged.compute_vertex_normals()
     return merged
+
+
+def uv_unwrap_mesh(vertices, faces, atlas_resolution=4096):
+    """Compute UV coordinates for a mesh using xatlas.
+
+    Args:
+        vertices: (N, 3) float64 array of vertex positions.
+        faces: (F, 3) int array of triangle indices.
+        atlas_resolution: Target resolution hint for the atlas packer.
+
+    Returns:
+        (vmapping, new_faces, uv_coords): vmapping maps new vertices to original,
+        new_faces are the remapped triangle indices, uv_coords are (M, 2) in [0, 1].
+    """
+    atlas = xatlas.Atlas()
+    atlas.add_mesh(vertices.astype(np.float32), faces.astype(np.uint32))
+    pack_options = xatlas.PackOptions()
+    pack_options.resolution = atlas_resolution
+    atlas.generate(xatlas.ChartOptions(), pack_options)
+    vmapping, new_faces, uv_coords = atlas[0]
+    uv_coords = uv_coords.astype(np.float64)
+    w = max(atlas.width, 1)
+    h = max(atlas.height, 1)
+    uv_coords[:, 0] /= w
+    uv_coords[:, 1] /= h
+    return vmapping, new_faces, uv_coords
+
+
+def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
+                       atlas_resolution=4096, knn=8):
+    """Bake a texture atlas by projecting source point cloud colors onto UV space.
+
+    For each texel covered by a triangle, interpolates 3D position via barycentric
+    coordinates, then queries the nearest source points via KD-tree and blends their
+    colors using inverse-distance weighting.
+
+    Args:
+        vertices: (N, 3) float64 mesh vertex positions.
+        faces: (F, 3) int array of triangle indices.
+        uv_coords: (N, 2) float64 UV coordinates in [0, 1] per vertex.
+        source_points: (P, 3) float64 colored point cloud positions.
+        source_colors: (P, 3) float64 RGB colors in [0, 1].
+        atlas_resolution: Width and height of the output atlas in pixels.
+        knn: Number of nearest source points used for IDW color blending.
+
+    Returns:
+        atlas: (atlas_resolution, atlas_resolution, 3) uint8 RGB image.
+    """
+    res = atlas_resolution
+    atlas = np.zeros((res, res, 3), dtype=np.uint8)
+    tree = cKDTree(source_points)
+    face_uvs = uv_coords[faces]
+    face_verts = vertices[faces]
+    n_faces = len(faces)
+    batch_size = 10000
+    for batch_start in range(0, n_faces, batch_size):
+        batch_end = min(batch_start + batch_size, n_faces)
+        all_pixels_u = []
+        all_pixels_v = []
+        all_pos_3d = []
+        for fi in range(batch_start, batch_end):
+            uvs = face_uvs[fi]
+            verts = face_verts[fi]
+            pix = (uvs * (res - 1)).astype(np.int32)
+            u_min = max(pix[:, 0].min(), 0)
+            u_max = min(pix[:, 0].max(), res - 1)
+            v_min = max(pix[:, 1].min(), 0)
+            v_max = min(pix[:, 1].max(), res - 1)
+            if u_min > u_max or v_min > v_max:
+                continue
+            us = np.arange(u_min, u_max + 1)
+            vs = np.arange(v_min, v_max + 1)
+            grid_u, grid_v = np.meshgrid(us, vs)
+            pixels = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
+            if len(pixels) == 0:
+                continue
+            p = pixels.astype(np.float64)
+            v0 = pix[1].astype(np.float64) - pix[0].astype(np.float64)
+            v1 = pix[2].astype(np.float64) - pix[0].astype(np.float64)
+            v2 = p - pix[0].astype(np.float64)
+            dot00 = v0 @ v0
+            dot01 = v0 @ v1
+            dot11 = v1 @ v1
+            denom = dot00 * dot11 - dot01 * dot01
+            if abs(denom) < 1e-10:
+                continue
+            dot02 = v2 @ v0
+            dot12 = v2 @ v1
+            u_b = (dot11 * dot02 - dot01 * dot12) / denom
+            v_b = (dot00 * dot12 - dot01 * dot02) / denom
+            inside = (u_b >= -0.01) & (v_b >= -0.01) & (u_b + v_b <= 1.01)
+            if not inside.any():
+                continue
+            ins_pix = pixels[inside]
+            ub = u_b[inside]
+            vb = v_b[inside]
+            wb = 1.0 - ub - vb
+            pos = (wb[:, None] * verts[0] + ub[:, None] * verts[1] + vb[:, None] * verts[2])
+            all_pixels_u.append(ins_pix[:, 0])
+            all_pixels_v.append(ins_pix[:, 1])
+            all_pos_3d.append(pos)
+        if not all_pos_3d:
+            continue
+        batch_u = np.concatenate(all_pixels_u)
+        batch_v = np.concatenate(all_pixels_v)
+        batch_pos = np.concatenate(all_pos_3d)
+        dists, idxs = tree.query(batch_pos, k=knn)
+        weights = 1.0 / np.maximum(dists, 1e-8)
+        weights /= weights.sum(axis=1, keepdims=True)
+        colors = np.zeros((len(batch_pos), 3))
+        for k_i in range(knn):
+            colors += weights[:, k_i:k_i+1] * source_colors[idxs[:, k_i]]
+        colors_uint8 = np.clip(colors * 255, 0, 255).astype(np.uint8)
+        atlas[batch_v, batch_u] = colors_uint8
+    return atlas
+
+
+def dilate_texture(atlas, iterations=8):
+    """Fill empty (black) texels by averaging neighboring filled texels.
+
+    Iteratively expands filled regions into adjacent empty pixels, which
+    eliminates black seams at UV chart boundaries when mipmapping is applied.
+
+    Args:
+        atlas: (H, W, 3) uint8 RGB texture atlas.
+        iterations: Number of dilation passes.
+
+    Returns:
+        Dilated atlas with the same shape and dtype as the input.
+    """
+    result = atlas.copy()
+    empty_mask = result.sum(axis=2) == 0
+    for _ in range(iterations):
+        if not empty_mask.any():
+            break
+        padded = np.pad(result, ((1, 1), (1, 1), (0, 0)), mode='edge')
+        padded_mask = np.pad(~empty_mask, ((1, 1), (1, 1)), mode='constant', constant_values=False)
+        h, w = result.shape[:2]
+        neighbor_sum = np.zeros_like(result, dtype=np.float64)
+        neighbor_count = np.zeros((h, w), dtype=np.float64)
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dy == 0 and dx == 0:
+                    continue
+                ny, nx = 1 + dy, 1 + dx
+                neighbor_sum += padded[ny:ny+h, nx:nx+w].astype(np.float64) * padded_mask[ny:ny+h, nx:nx+w][:, :, None]
+                neighbor_count += padded_mask[ny:ny+h, nx:nx+w].astype(np.float64)
+        fillable = empty_mask & (neighbor_count > 0)
+        if not fillable.any():
+            break
+        avg = neighbor_sum[fillable] / neighbor_count[fillable][:, None]
+        result[fillable] = np.clip(avg, 0, 255).astype(np.uint8)
+        empty_mask[fillable] = False
+    return result

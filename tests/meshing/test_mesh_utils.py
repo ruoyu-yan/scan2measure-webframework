@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src" / "meshing"))
-from mesh_utils import compute_tile_grid, extract_tile_points, trim_to_ownership_region, merge_tile_meshes
+from mesh_utils import compute_tile_grid, extract_tile_points, trim_to_ownership_region, merge_tile_meshes, uv_unwrap_mesh, bake_texture_atlas, dilate_texture
 
 
 def test_compute_tile_grid_single_tile():
@@ -83,3 +83,37 @@ def test_merge_tile_meshes_empty_list():
     merged = merge_tile_meshes([])
     assert len(merged.vertices) == 0
     assert len(merged.triangles) == 0
+
+
+def test_uv_unwrap_mesh():
+    mesh = o3d.geometry.TriangleMesh.create_box(1.0, 1.0, 1.0)
+    vertices = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.triangles)
+    vmapping, new_faces, uv_coords = uv_unwrap_mesh(vertices, faces, atlas_resolution=512)
+    assert uv_coords.ndim == 2 and uv_coords.shape[1] == 2
+    assert np.all(uv_coords >= 0.0) and np.all(uv_coords <= 1.0)
+    assert len(vmapping) == len(uv_coords)
+    assert new_faces.shape[1] == 3
+
+
+def test_bake_texture_atlas():
+    vertices = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0]], dtype=np.float64)
+    faces = np.array([[0,1,2],[0,2,3]], dtype=np.int32)
+    uv_coords = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float64)
+    source_points = np.array([[0.25,0.25,0],[0.75,0.25,0],[0.25,0.75,0],[0.75,0.75,0]])
+    source_colors = np.full((4, 3), [1.0, 0.0, 0.0])
+    atlas = bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors, atlas_resolution=64, knn=4)
+    assert atlas.shape == (64, 64, 3)
+    assert atlas.dtype == np.uint8
+    nonzero = atlas[atlas.sum(axis=2) > 0]
+    if len(nonzero) > 0:
+        avg_color = nonzero.mean(axis=0)
+        assert avg_color[0] > 200
+
+
+def test_dilate_texture():
+    atlas = np.zeros((8, 8, 3), dtype=np.uint8)
+    atlas[4, 4] = [255, 0, 0]
+    dilated = dilate_texture(atlas, iterations=2)
+    assert np.array_equal(dilated[4, 4], [255, 0, 0])
+    assert dilated[3, 4].sum() > 0 or dilated[5, 4].sum() > 0
