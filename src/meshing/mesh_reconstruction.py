@@ -105,8 +105,11 @@ def main():
     print(f"    {n_tiles} tiles")
 
     # ── Stage 3: Per-tile reconstruction ─────────────────────────────────────
+    # Each tile mesh is saved to disk immediately after reconstruction to
+    # avoid accumulating all tile meshes in memory (OOM risk at depth 11).
     print(f"[3] Running per-tile Poisson reconstruction ...")
-    tile_meshes = []
+    import tempfile, gc
+    tile_ply_paths = []
     n_skipped = 0
 
     for tile_idx, (core_min, core_max, ext_min, ext_max) in enumerate(tiles):
@@ -132,30 +135,44 @@ def main():
         # Density trim
         tile_mesh = remove_low_density(tile_mesh, densities,
                                        quantile=DENSITY_TRIM_QUANTILE)
+        del densities
 
         # Ownership trim — keep only triangles whose centroids fall in the core
         tile_mesh = trim_to_ownership_region(tile_mesh, core_min, core_max)
 
         # Transfer vertex colors (from tile point cloud)
         tile_mesh = transfer_vertex_colors(tile_mesh, tile_pcd)
+        del tile_pcd
 
         n_verts = len(tile_mesh.vertices)
         n_tris = len(tile_mesh.triangles)
         print(f"-> {n_verts:,}v / {n_tris:,}t")
 
-        tile_meshes.append(tile_mesh)
+        # Save tile mesh to disk and free memory
+        tile_ply = OUTPUT_DIR / f"_tile_{tile_idx}.ply"
+        o3d.io.write_triangle_mesh(str(tile_ply), tile_mesh)
+        tile_ply_paths.append(tile_ply)
+        del tile_mesh
+        gc.collect()
 
-        # Free tile data
-        del tile_pcd, densities
-
-    print(f"    Tiles processed: {len(tile_meshes)}, skipped: {n_skipped}")
+    print(f"    Tiles processed: {len(tile_ply_paths)}, skipped: {n_skipped}")
 
     # ── Stage 4: Merge tile meshes ───────────────────────────────────────────
-    print(f"[4] Merging {len(tile_meshes)} tile meshes ...")
+    # Reload tile meshes from disk (one at a time is fine — merge is fast)
+    print(f"[4] Merging {len(tile_ply_paths)} tile meshes ...")
+    tile_meshes = []
+    for tile_ply in tile_ply_paths:
+        tile_meshes.append(o3d.io.read_triangle_mesh(str(tile_ply)))
     merged_mesh = merge_tile_meshes(tile_meshes)
+    del tile_meshes
+    gc.collect()
     n_merged_verts = len(merged_mesh.vertices)
     n_merged_tris = len(merged_mesh.triangles)
     print(f"    Merged: {n_merged_verts:,} vertices, {n_merged_tris:,} triangles")
+
+    # Clean up temp tile files
+    for tile_ply in tile_ply_paths:
+        tile_ply.unlink(missing_ok=True)
 
     # ── Stage 5: Save vertex-colored PLY ─────────────────────────────────────
     ply_path = OUTPUT_DIR / f"{POINT_CLOUD_NAME}_vertex_colored.ply"
