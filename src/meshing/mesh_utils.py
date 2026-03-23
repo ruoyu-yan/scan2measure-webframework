@@ -167,3 +167,48 @@ def extract_tile_points(pcd, ext_min, ext_max):
     if pcd.has_normals():
         tile_pcd.normals = o3d.utility.Vector3dVector(np.asarray(pcd.normals)[mask])
     return tile_pcd
+
+
+def trim_to_ownership_region(mesh, core_min, core_max):
+    """Remove triangles whose centroids fall outside the core tile bounds."""
+    vertices = np.asarray(mesh.vertices)
+    triangles = np.asarray(mesh.triangles)
+    centroids = vertices[triangles].mean(axis=1)
+    mask = (
+        (centroids[:, 0] >= core_min[0]) & (centroids[:, 0] <= core_max[0]) &
+        (centroids[:, 1] >= core_min[1]) & (centroids[:, 1] <= core_max[1])
+    )
+    kept_triangles = triangles[mask]
+    trimmed = o3d.geometry.TriangleMesh()
+    trimmed.vertices = o3d.utility.Vector3dVector(vertices)
+    trimmed.triangles = o3d.utility.Vector3iVector(kept_triangles)
+    if mesh.has_vertex_colors():
+        trimmed.vertex_colors = mesh.vertex_colors
+    trimmed.remove_unreferenced_vertices()
+    return trimmed
+
+
+def merge_tile_meshes(meshes):
+    """Concatenate multiple tile meshes into a single mesh."""
+    if not meshes:
+        return o3d.geometry.TriangleMesh()
+    all_vertices = []
+    all_triangles = []
+    all_colors = []
+    vertex_offset = 0
+    for mesh in meshes:
+        verts = np.asarray(mesh.vertices)
+        tris = np.asarray(mesh.triangles)
+        all_vertices.append(verts)
+        all_triangles.append(tris + vertex_offset)
+        if mesh.has_vertex_colors():
+            all_colors.append(np.asarray(mesh.vertex_colors))
+        vertex_offset += len(verts)
+    merged = o3d.geometry.TriangleMesh()
+    merged.vertices = o3d.utility.Vector3dVector(np.vstack(all_vertices))
+    merged.triangles = o3d.utility.Vector3iVector(np.vstack(all_triangles))
+    if all_colors and len(all_colors) == len(meshes):
+        merged.vertex_colors = o3d.utility.Vector3dVector(np.vstack(all_colors))
+    merged.remove_degenerate_triangles()
+    merged.compute_vertex_normals()
+    return merged
