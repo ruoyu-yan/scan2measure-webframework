@@ -73,10 +73,7 @@ def remove_low_density(mesh, densities, quantile=0.01):
 
 
 def transfer_vertex_colors(mesh, source_pcd):
-    """Transfer colors from a colored point cloud to mesh vertices via KD-tree.
-
-    For each mesh vertex, finds the nearest point in the source point cloud
-    and copies its color.
+    """Transfer colors from a point cloud to mesh vertices via batch KD-tree.
 
     Args:
         mesh: Open3D TriangleMesh (vertices will receive colors).
@@ -88,36 +85,10 @@ def transfer_vertex_colors(mesh, source_pcd):
     source_points = np.asarray(source_pcd.points)
     source_colors = np.asarray(source_pcd.colors)
     mesh_vertices = np.asarray(mesh.vertices)
-
-    pcd_tree = o3d.geometry.KDTreeFlann(source_pcd)
-
-    colors = np.zeros_like(mesh_vertices)
-    for i in range(len(mesh_vertices)):
-        _, idx, _ = pcd_tree.search_knn_vector_3d(mesh_vertices[i], 1)
-        colors[i] = source_colors[idx[0]]
-
+    tree = cKDTree(source_points)
+    _, idx = tree.query(mesh_vertices, k=1)
+    colors = source_colors[idx]
     mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
-    return mesh
-
-
-def decimate_mesh(mesh, target_triangles, preserve_edges=True):
-    """Decimate mesh using quadric error metrics.
-
-    Args:
-        mesh: Open3D TriangleMesh.
-        target_triangles: Target number of triangles after decimation.
-        preserve_edges: If True, applies higher weight to boundary edges
-            to preserve measurement-relevant geometry.
-
-    Returns:
-        Decimated TriangleMesh.
-    """
-    mesh = mesh.simplify_quadric_decimation(
-        target_number_of_triangles=target_triangles
-    )
-    # Clean up after decimation
-    mesh.remove_degenerate_triangles()
-    mesh.remove_unreferenced_vertices()
     return mesh
 
 
