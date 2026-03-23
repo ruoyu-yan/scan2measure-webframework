@@ -117,3 +117,25 @@ def test_dilate_texture():
     dilated = dilate_texture(atlas, iterations=2)
     assert np.array_equal(dilated[4, 4], [255, 0, 0])
     assert dilated[3, 4].sum() > 0 or dilated[5, 4].sum() > 0
+
+
+def test_voxel_downsample_preserves_colors():
+    """Open3D voxel downsample keeps color information."""
+    points = np.array([
+        [0.0, 0.0, 0.0],
+        [0.001, 0.001, 0.001],  # within 5mm of first point
+        [1.0, 1.0, 1.0],
+    ])
+    colors = np.array([
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ])
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    ds = pcd.voxel_down_sample(voxel_size=0.005)
+    assert ds.has_colors()
+    assert len(ds.points) <= 3  # first two may merge
+    assert len(ds.points) >= 2  # at least two distinct voxels

@@ -1,7 +1,7 @@
 """Library helpers for mesh reconstruction from colored point clouds.
 
 Provides normal estimation, Poisson reconstruction, density-based cleanup,
-vertex color transfer, and quadric decimation.
+vertex color transfer, spatial tiling, UV unwrapping, and texture atlas baking.
 """
 
 import numpy as np
@@ -214,7 +214,7 @@ def uv_unwrap_mesh(vertices, faces, atlas_resolution=4096):
 
 
 def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
-                       atlas_resolution=4096, knn=8):
+                       atlas_resolution=4096, knn=4):
     """Bake a texture atlas by projecting source point cloud colors onto UV space.
 
     For each texel covered by a triangle, interpolates 3D position via barycentric
