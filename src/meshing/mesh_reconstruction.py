@@ -63,6 +63,7 @@ MIN_TILE_POINTS = 1000
 ATLAS_RESOLUTION = 4096
 BAKE_KNN = 4
 VOXEL_SIZE = 0.005  # 5 mm downsample
+GLB_TARGET_TRIANGLES = 500_000  # decimate for UV/bake speed (full-res kept in PLY)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 INPUT_PATH = ROOT / "data" / "textured_point_cloud" / f"{POINT_CLOUD_NAME}.ply"
@@ -192,13 +193,31 @@ def main():
         tile_ply.unlink(missing_ok=True)
     tiles_dir.rmdir()  # remove empty tiles dir
 
-    # ── Stage 11: Save vertex-colored PLY ────────────────────────────────────
+    # ── Stage 11: Save full-resolution vertex-colored PLY ───────────────────
     ply_path = OUTPUT_DIR / f"{POINT_CLOUD_NAME}_vertex_colored.ply"
-    print(f"[11/16] Saving vertex-colored PLY: {ply_path.name}")
+    print(f"[11/17] Saving full-res vertex-colored PLY: {ply_path.name}")
     export_vertex_color_ply(merged_mesh, ply_path)
+    n_full_tris = len(merged_mesh.triangles)
 
-    # ── Stage 12: Reload original cloud for texture baking ───────────────────
-    print(f"[12/16] Reloading original point cloud for texture baking ...")
+    # ── Stage 12: Decimate for UV/bake (full-res preserved in PLY) ───────────
+    if n_full_tris > GLB_TARGET_TRIANGLES:
+        print(f"[12/17] Decimating {n_full_tris:,} → {GLB_TARGET_TRIANGLES:,} triangles "
+              f"for textured GLB ...")
+        t = time.time()
+        merged_mesh = merged_mesh.simplify_quadric_decimation(
+            target_number_of_triangles=GLB_TARGET_TRIANGLES
+        )
+        merged_mesh.compute_vertex_normals()
+        n_dec_verts = len(merged_mesh.vertices)
+        n_dec_tris = len(merged_mesh.triangles)
+        print(f"       {n_dec_verts:,} vertices, {n_dec_tris:,} triangles "
+              f"in {time.time()-t:.1f}s")
+    else:
+        print(f"[12/17] No decimation needed ({n_full_tris:,} triangles ≤ target)")
+        n_dec_tris = n_full_tris
+
+    # ── Stage 13: Reload original cloud for texture baking ───────────────────
+    print(f"[13/17] Reloading original point cloud for texture baking ...")
     pcd_full = o3d.io.read_point_cloud(str(INPUT_PATH))
     source_points = np.asarray(pcd_full.points)
     source_colors = np.asarray(pcd_full.colors) if pcd_full.has_colors() else None
@@ -209,14 +228,12 @@ def main():
         del pcd_full
         return
 
-    # ── Stage 13: UV unwrap ──────────────────────────────────────────────────
-    print(f"[13/16] UV unwrapping with xatlas (resolution={ATLAS_RESOLUTION}) ...")
+    # ── Stage 14: UV unwrap ──────────────────────────────────────────────────
+    print(f"[14/17] UV unwrapping with xatlas (resolution={ATLAS_RESOLUTION}) ...")
     t = time.time()
     vertices = np.asarray(merged_mesh.vertices)
     normals_arr = np.asarray(merged_mesh.vertex_normals)
     faces = np.asarray(merged_mesh.triangles)
-
-    # Note: merge_tile_meshes() already called remove_degenerate_triangles()
 
     try:
         vmapping, new_faces, uv_coords = uv_unwrap_mesh(
@@ -237,8 +254,8 @@ def main():
     del merged_mesh
     gc.collect()
 
-    # ── Stage 14: Bake texture atlas ─────────────────────────────────────────
-    print(f"[14/16] Baking texture atlas ({ATLAS_RESOLUTION}x{ATLAS_RESOLUTION}, "
+    # ── Stage 15: Bake texture atlas ─────────────────────────────────────────
+    print(f"[15/17] Baking texture atlas ({ATLAS_RESOLUTION}x{ATLAS_RESOLUTION}, "
           f"knn={BAKE_KNN}) ...")
     t = time.time()
     atlas = bake_texture_atlas(
@@ -251,13 +268,13 @@ def main():
     gc.collect()
     print(f"       Done in {time.time()-t:.1f}s")
 
-    # ── Stage 15: Dilate empty texels ────────────────────────────────────────
-    print(f"[15/16] Dilating empty texels ...")
+    # ── Stage 16: Dilate empty texels ────────────────────────────────────────
+    print(f"[16/17] Dilating empty texels ...")
     atlas = dilate_texture(atlas, iterations=8)
 
-    # ── Stage 16: Export GLB ─────────────────────────────────────────────────
+    # ── Stage 17: Export GLB ─────────────────────────────────────────────────
     glb_path = OUTPUT_DIR / f"{POINT_CLOUD_NAME}.glb"
-    print(f"[16/16] Exporting GLB: {glb_path.name}")
+    print(f"[17/17] Exporting GLB: {glb_path.name}")
     t = time.time()
     export_textured_glb(
         new_vertices, new_faces, uv_coords, new_normals,
@@ -280,6 +297,8 @@ def main():
         "n_tiles_skipped": n_skipped,
         "tile_size_m": TILE_SIZE,
         "poisson_depth": POISSON_DEPTH,
+        "n_full_res_triangles": int(n_full_tris),
+        "glb_target_triangles": GLB_TARGET_TRIANGLES,
         "n_vertices": int(len(new_vertices)),
         "n_triangles": int(len(new_faces)),
         "bbox_min_m": bbox_min_m,
