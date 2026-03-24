@@ -19,13 +19,13 @@ import open3d as o3d
 # ============================================================
 # CONFIGURATION
 # ============================================================
-POINT_CLOUD_NAME = "tmb_office_one_corridor_dense"   # input PLY name (without .ply) and output folder name
+POINT_CLOUD_NAME = "tmb_office_one_corridor_bigger_noRGB"   # input PLY name (without .ply) and output folder name
 KNN              = 20              # k neighbours passed to 3DLineDetection
 
 # ============================================================
 # PATHS
 # ============================================================
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 ply_path     = project_root / "data" / "raw_point_cloud" / f"{POINT_CLOUD_NAME}.ply"
 out_dir      = project_root / "data" / "debug_renderer" / POINT_CLOUD_NAME
 binary       = project_root / "3DLineDetection" / "build" / "src" / "LineFromPointCloud"

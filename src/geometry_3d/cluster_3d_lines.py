@@ -25,14 +25,14 @@ from line_clustering_3d import (
 )
 
 # ── Configuration (matching FGPL defaults) ────────────────────────────
-POINT_CLOUD_NAME    = "tmb_office_one_corridor_dense"
+POINT_CLOUD_NAME    = "tmb_office_one_corridor_bigger_noRGB"
 SPARSE_LENGTH_FACTOR = 0.10      # fraction of extent for sparse set
 DENSE_LENGTH_THRES  = 0.2        # meters, fixed threshold for dense set
 INLIER_THRES        = 0.1        # classification cosine threshold
 INTERSECT_THRES     = 0.2        # intersection distance threshold
 
 # ── Paths ─────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR     = PROJECT_ROOT / "data" / "debug_renderer" / POINT_CLOUD_NAME
 PKL_IN       = DATA_DIR / "room_geometry.pkl"
 
