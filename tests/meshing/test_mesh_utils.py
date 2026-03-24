@@ -4,7 +4,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src" / "meshing"))
-from mesh_utils import compute_tile_grid, extract_tile_points, trim_to_ownership_region, merge_tile_meshes, uv_unwrap_mesh, bake_texture_atlas, dilate_texture
+import tempfile
+from mesh_utils import (
+    compute_tile_grid, extract_tile_points, trim_to_ownership_region,
+    merge_tile_meshes, uv_unwrap_mesh, bake_texture_atlas, dilate_texture,
+    process_tiles_parallel,
+)
 
 
 def test_compute_tile_grid_single_tile():
@@ -139,3 +144,57 @@ def test_voxel_downsample_preserves_colors():
     assert ds.has_colors()
     assert len(ds.points) <= 3  # first two may merge
     assert len(ds.points) >= 2  # at least two distinct voxels
+
+
+def test_bake_texture_atlas_parallel():
+    """Parallel baking produces same shape/dtype and similar colors."""
+    vertices = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0]], dtype=np.float64)
+    faces = np.array([[0,1,2],[0,2,3]], dtype=np.int32)
+    uv_coords = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float64)
+    source_points = np.array([[0.25,0.25,0],[0.75,0.25,0],[0.25,0.75,0],[0.75,0.75,0]])
+    source_colors = np.full((4, 3), [1.0, 0.0, 0.0])
+    atlas = bake_texture_atlas(vertices, faces, uv_coords, source_points,
+                               source_colors, atlas_resolution=64, knn=4,
+                               max_workers=2)
+    assert atlas.shape == (64, 64, 3)
+    assert atlas.dtype == np.uint8
+    nonzero = atlas[atlas.sum(axis=2) > 0]
+    if len(nonzero) > 0:
+        avg_color = nonzero.mean(axis=0)
+        assert avg_color[0] > 200
+
+
+def test_process_tiles_parallel():
+    """Parallel tile processing creates PLY files and returns correct counts."""
+    # Create a simple point cloud spanning two tiles
+    n = 5000
+    rng = np.random.RandomState(42)
+    points_a = rng.uniform([0, 0, 0], [5, 5, 2], size=(n, 3))
+    points_b = rng.uniform([7, 0, 0], [12, 5, 2], size=(n, 3))
+    all_points = np.vstack([points_a, points_b])
+    all_colors = rng.uniform(0, 1, size=(2 * n, 3))
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(all_points)
+    pcd.colors = o3d.utility.Vector3dVector(all_colors)
+
+    tiles = compute_tile_grid(
+        all_points.min(axis=0), all_points.max(axis=0),
+        tile_size=6.0, overlap=1.0
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tile_ply_paths, n_skipped, tile_results = process_tiles_parallel(
+            pcd, tiles, tmpdir,
+            normal_knn=20, normal_radius=0.5,
+            poisson_depth=5, density_trim_quantile=0.06,
+            min_tile_points=100, max_workers=2,
+        )
+        # At least one tile should produce output
+        assert len(tile_ply_paths) >= 1
+        # Each returned path should exist on disk
+        for p in tile_ply_paths:
+            assert p.exists()
+        # Results should be sorted by tile index
+        indices = [r[0] for r in tile_results]
+        assert indices == sorted(indices)

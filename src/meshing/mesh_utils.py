@@ -2,12 +2,22 @@
 
 Provides normal estimation, Poisson reconstruction, density-based cleanup,
 vertex color transfer, spatial tiling, UV unwrapping, and texture atlas baking.
+Includes parallel execution support for tile processing and texture baking.
 """
+
+import multiprocessing
+import os
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 import open3d as o3d
 import xatlas
 from scipy.spatial import cKDTree
+
+# Use 'spawn' context to avoid fork+thread deadlocks with Open3D
+_MP_CONTEXT = multiprocessing.get_context('spawn')
 
 
 def estimate_normals(pcd, knn=30, radius=0.1):
@@ -91,6 +101,118 @@ def transfer_vertex_colors(mesh, source_pcd):
     mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
     return mesh
 
+
+# ── Parallel tile processing ────────────────────────────────────────────────
+
+def _process_single_tile(tile_idx, core_min, core_max, tile_points, tile_colors,
+                         tile_ply_path, normal_knn, normal_radius, poisson_depth,
+                         density_trim_quantile):
+    """Worker: reconstruct one tile in a subprocess. Returns picklable tuple."""
+    t = time.time()
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(tile_points)
+    if tile_colors is not None:
+        pcd.colors = o3d.utility.Vector3dVector(tile_colors)
+
+    pcd = estimate_normals(pcd, knn=normal_knn, radius=normal_radius)
+    mesh, densities = poisson_reconstruct(pcd, depth=poisson_depth)
+    mesh = remove_low_density(mesh, densities, quantile=density_trim_quantile)
+    del densities
+
+    if len(mesh.triangles) == 0:
+        return (tile_idx, None, 0, 0, time.time() - t)
+
+    mesh = trim_to_ownership_region(mesh, core_min, core_max)
+
+    if len(mesh.triangles) == 0:
+        del pcd
+        return (tile_idx, None, 0, 0, time.time() - t)
+
+    mesh = transfer_vertex_colors(mesh, pcd)
+    del pcd
+
+    n_verts = len(mesh.vertices)
+    n_tris = len(mesh.triangles)
+    o3d.io.write_triangle_mesh(tile_ply_path, mesh)
+    del mesh
+    return (tile_idx, tile_ply_path, n_verts, n_tris, time.time() - t)
+
+
+def process_tiles_parallel(pcd_ds, tiles, tiles_dir, normal_knn=50,
+                           normal_radius=0.15, poisson_depth=9,
+                           density_trim_quantile=0.06, min_tile_points=1000,
+                           max_workers=None):
+    """Process all tiles in parallel using ProcessPoolExecutor.
+
+    Pre-extracts each tile's points as numpy arrays in the main process,
+    then dispatches independent worker processes for Poisson reconstruction.
+
+    Returns:
+        (tile_ply_paths, n_skipped, tile_results)
+        tile_results: list of (tile_idx, ply_path_or_None, n_verts, n_tris, elapsed_s)
+    """
+    n_tiles = len(tiles)
+    if max_workers is None:
+        max_workers = min(n_tiles, max(1, os.cpu_count() // 8))
+
+    # Pre-extract tile numpy arrays in main process
+    points_arr = np.asarray(pcd_ds.points)
+    colors_arr = np.asarray(pcd_ds.colors) if pcd_ds.has_colors() else None
+
+    tile_jobs = []
+    n_skipped = 0
+    for tile_idx, (core_min, core_max, ext_min, ext_max) in enumerate(tiles):
+        mask = np.all((points_arr >= ext_min) & (points_arr <= ext_max), axis=1)
+        tile_points = points_arr[mask]
+        n_tile_pts = len(tile_points)
+
+        if n_tile_pts < min_tile_points:
+            print(f"       Tile {tile_idx+1}/{n_tiles}: "
+                  f"skipped ({n_tile_pts} pts < {min_tile_points})")
+            n_skipped += 1
+            continue
+
+        tile_colors = colors_arr[mask] if colors_arr is not None else None
+        tile_ply_path = str(Path(tiles_dir) / f"tile_{tile_idx}.ply")
+
+        tile_jobs.append((tile_idx, core_min, core_max, tile_points, tile_colors,
+                          tile_ply_path, normal_knn, normal_radius, poisson_depth,
+                          density_trim_quantile))
+        print(f"       Tile {tile_idx+1}/{n_tiles}: {n_tile_pts:,} pts -> dispatched")
+
+    if not tile_jobs:
+        return [], n_skipped, []
+
+    actual_workers = min(max_workers, len(tile_jobs))
+    print(f"       Processing {len(tile_jobs)} tiles with {actual_workers} workers ...")
+
+    tile_results = []
+    with ProcessPoolExecutor(max_workers=actual_workers,
+                             mp_context=_MP_CONTEXT) as executor:
+        futures = {
+            executor.submit(_process_single_tile, *args): args[0]
+            for args in tile_jobs
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            tile_results.append(result)
+            tidx, ply_path, n_verts, n_tris, elapsed = result
+            if ply_path is not None:
+                print(f"       Tile {tidx+1}/{n_tiles}: "
+                      f"{n_verts:,}v / {n_tris:,}t in {elapsed:.1f}s")
+            else:
+                n_skipped += 1
+                print(f"       Tile {tidx+1}/{n_tiles}: "
+                      f"skipped (0 triangles) in {elapsed:.1f}s")
+
+    # Sort by tile index for deterministic merge order
+    tile_results.sort(key=lambda x: x[0])
+    tile_ply_paths = [Path(r[1]) for r in tile_results if r[1] is not None]
+
+    return tile_ply_paths, n_skipped, tile_results
+
+
+# ── Mesh statistics & tiling ────────────────────────────────────────────────
 
 def compute_mesh_stats(mesh):
     """Compute basic mesh statistics.
@@ -187,6 +309,8 @@ def merge_tile_meshes(meshes):
     return merged
 
 
+# ── UV unwrapping & texture baking ──────────────────────────────────────────
+
 def uv_unwrap_mesh(vertices, faces, atlas_resolution=4096):
     """Compute UV coordinates for a mesh using xatlas.
 
@@ -213,8 +337,100 @@ def uv_unwrap_mesh(vertices, faces, atlas_resolution=4096):
     return vmapping, new_faces, uv_coords
 
 
+# Module-level state for bake workers (set by initializer in spawn context)
+_bake_source_points = None
+_bake_source_colors = None
+_bake_face_uvs = None
+_bake_face_verts = None
+
+
+def _bake_worker_init(source_points, source_colors, face_uvs, face_verts):
+    """Initializer for bake worker processes — sets module globals."""
+    global _bake_source_points, _bake_source_colors
+    global _bake_face_uvs, _bake_face_verts
+    _bake_source_points = source_points
+    _bake_source_colors = source_colors
+    _bake_face_uvs = face_uvs
+    _bake_face_verts = face_verts
+
+
+def _bake_face_chunk(face_start, face_end, atlas_resolution, knn):
+    """Worker: bake a chunk of faces into a partial atlas."""
+    source_points = _bake_source_points
+    source_colors = _bake_source_colors
+    face_uvs = _bake_face_uvs
+    face_verts = _bake_face_verts
+
+    res = atlas_resolution
+    atlas = np.zeros((res, res, 3), dtype=np.uint8)
+    tree = cKDTree(source_points)
+
+    batch_size = 10000
+    for batch_start in range(face_start, face_end, batch_size):
+        batch_end = min(batch_start + batch_size, face_end)
+        all_pixels_u = []
+        all_pixels_v = []
+        all_pos_3d = []
+        for fi in range(batch_start, batch_end):
+            uvs = face_uvs[fi]
+            verts = face_verts[fi]
+            pix = (uvs * (res - 1)).astype(np.int32)
+            u_min = max(pix[:, 0].min(), 0)
+            u_max = min(pix[:, 0].max(), res - 1)
+            v_min = max(pix[:, 1].min(), 0)
+            v_max = min(pix[:, 1].max(), res - 1)
+            if u_min > u_max or v_min > v_max:
+                continue
+            us = np.arange(u_min, u_max + 1)
+            vs = np.arange(v_min, v_max + 1)
+            grid_u, grid_v = np.meshgrid(us, vs)
+            pixels = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
+            if len(pixels) == 0:
+                continue
+            p = pixels.astype(np.float64)
+            v0 = pix[1].astype(np.float64) - pix[0].astype(np.float64)
+            v1 = pix[2].astype(np.float64) - pix[0].astype(np.float64)
+            v2 = p - pix[0].astype(np.float64)
+            dot00 = v0 @ v0
+            dot01 = v0 @ v1
+            dot11 = v1 @ v1
+            denom = dot00 * dot11 - dot01 * dot01
+            if abs(denom) < 1e-10:
+                continue
+            dot02 = v2 @ v0
+            dot12 = v2 @ v1
+            u_b = (dot11 * dot02 - dot01 * dot12) / denom
+            v_b = (dot00 * dot12 - dot01 * dot02) / denom
+            inside = (u_b >= -0.01) & (v_b >= -0.01) & (u_b + v_b <= 1.01)
+            if not inside.any():
+                continue
+            ins_pix = pixels[inside]
+            ub = u_b[inside]
+            vb = v_b[inside]
+            wb = 1.0 - ub - vb
+            pos = (wb[:, None] * verts[0] + ub[:, None] * verts[1]
+                   + vb[:, None] * verts[2])
+            all_pixels_u.append(ins_pix[:, 0])
+            all_pixels_v.append(ins_pix[:, 1])
+            all_pos_3d.append(pos)
+        if not all_pos_3d:
+            continue
+        batch_u = np.concatenate(all_pixels_u)
+        batch_v = np.concatenate(all_pixels_v)
+        batch_pos = np.concatenate(all_pos_3d)
+        dists, idxs = tree.query(batch_pos, k=knn)
+        weights = 1.0 / np.maximum(dists, 1e-8)
+        weights /= weights.sum(axis=1, keepdims=True)
+        colors = np.zeros((len(batch_pos), 3))
+        for k_i in range(knn):
+            colors += weights[:, k_i:k_i+1] * source_colors[idxs[:, k_i]]
+        colors_uint8 = np.clip(colors * 255, 0, 255).astype(np.uint8)
+        atlas[batch_v, batch_u] = colors_uint8
+    return atlas
+
+
 def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
-                       atlas_resolution=4096, knn=4):
+                       atlas_resolution=4096, knn=4, max_workers=1):
     """Bake a texture atlas by projecting source point cloud colors onto UV space.
 
     For each texel covered by a triangle, interpolates 3D position via barycentric
@@ -229,16 +445,44 @@ def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
         source_colors: (P, 3) float64 RGB colors in [0, 1].
         atlas_resolution: Width and height of the output atlas in pixels.
         knn: Number of nearest source points used for IDW color blending.
+        max_workers: Number of parallel workers (1 = sequential).
 
     Returns:
         atlas: (atlas_resolution, atlas_resolution, 3) uint8 RGB image.
     """
     res = atlas_resolution
-    atlas = np.zeros((res, res, 3), dtype=np.uint8)
-    tree = cKDTree(source_points)
     face_uvs = uv_coords[faces]
     face_verts = vertices[faces]
     n_faces = len(faces)
+
+    # ── Parallel path ────────────────────────────────────────────────────────
+    if max_workers > 1:
+        chunk_size = max(1, n_faces // max_workers)
+        face_chunks = []
+        for i in range(0, n_faces, chunk_size):
+            face_chunks.append((i, min(i + chunk_size, n_faces)))
+
+        actual_workers = min(max_workers, len(face_chunks))
+        atlas = np.zeros((res, res, 3), dtype=np.uint8)
+        with ProcessPoolExecutor(
+            max_workers=actual_workers,
+            mp_context=_MP_CONTEXT,
+            initializer=_bake_worker_init,
+            initargs=(source_points, source_colors, face_uvs, face_verts),
+        ) as executor:
+            futures = [
+                executor.submit(_bake_face_chunk, start, end, res, knn)
+                for start, end in face_chunks
+            ]
+            for future in futures:
+                partial = future.result()
+                mask = partial.sum(axis=2) > 0
+                atlas[mask] = partial[mask]
+        return atlas
+
+    # ── Sequential path (original) ──────────────────────────────────────────
+    atlas = np.zeros((res, res, 3), dtype=np.uint8)
+    tree = cKDTree(source_points)
     batch_size = 10000
     for batch_start in range(0, n_faces, batch_size):
         batch_end = min(batch_start + batch_size, n_faces)
