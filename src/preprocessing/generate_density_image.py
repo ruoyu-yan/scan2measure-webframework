@@ -10,7 +10,7 @@ from pathlib import Path
 # 0. PATH SETUP
 # -------------------------------------------------------------------------
 current_file = Path(__file__).resolve()
-project_root = current_file.parent.parent  # .../scan2measure-webframework
+project_root = current_file.parent.parent.parent  # .../scan2measure-webframework
 
 # Input Directory: .../data/raw_point_cloud
 input_dir = project_root / "data" / "raw_point_cloud"
@@ -158,7 +158,7 @@ def generate_density(point_cloud, width=256, height=256):
 # -------------------------------------------------------------------------
 def main():
     # --- CONFIGURATION ---
-    FILENAME = "tmb_office1_subsampled.ply"
+    FILENAME = "tmb_office_one_corridor_bigger_noRGB.ply"
     # ---------------------
 
     input_path = input_dir / FILENAME
