@@ -24,7 +24,7 @@ from visibility import compute_visibility_depth_buffer
 from color_sampling import sample_colors_bilinear, blend_colors_idw
 
 # ── Config ──────────────────────────────────────────────────────────────────
-POINT_CLOUD_NAME = "tmb_office_one_corridor_dense_noRGB"
+POINT_CLOUD_NAME = "tmb_office_one_corridor_bigger_noRGB"
 PANO_NAMES = ["TMB_office1", "TMB_corridor_south1", "TMB_corridor_south2"]
 
 # Depth buffer visibility
@@ -41,7 +41,7 @@ PC_PATH = ROOT / "data" / "raw_point_cloud" / f"{POINT_CLOUD_NAME}.ply"
 PANO_DIR = ROOT / "data" / "pano" / "raw"
 POSE_PATH = (ROOT / "data" / "pose_estimates" / "multiroom"
              / "local_filter_results.json")
-OUTPUT_DIR = ROOT / "data" / "textured_point_cloud"
+OUTPUT_DIR = ROOT / "data" / "textured_point_cloud" / POINT_CLOUD_NAME
 
 
 # ── Main ────────────────────────────────────────────────────────────────────

@@ -20,8 +20,9 @@ TEXTURED_PLY = "tmb_office_one_corridor_dense_noRGB_textured"
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 ORIGINAL_PATH = ROOT / "data" / "raw_point_cloud" / f"{ORIGINAL_PLY}.ply"
-TEXTURED_PATH = ROOT / "data" / "textured_point_cloud" / f"{TEXTURED_PLY}.ply"
-OUTPUT_DIR = ROOT / "data" / "textured_point_cloud"
+POINT_CLOUD_NAME = "tmb_office_one_corridor_dense_noRGB"
+TEXTURED_PATH = ROOT / "data" / "textured_point_cloud" / POINT_CLOUD_NAME / f"{TEXTURED_PLY}.ply"
+OUTPUT_DIR = ROOT / "data" / "textured_point_cloud" / POINT_CLOUD_NAME
 
 
 def main():
