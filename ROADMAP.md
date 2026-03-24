@@ -6,9 +6,9 @@
 
 ---
 
-## Phase 1: Room-Level Pano-to-Room Assignment (Jigsaw Puzzle Solver) 🟡
+## Phase 1: Room-Level Pano-to-Room Assignment (Jigsaw Puzzle Solver) ✅
 
-**Status**: 🟡 Core pipeline implemented, accuracy limited by upstream polygon quality.
+**Status**: ✅ SAM3-to-SAM3 jigsaw matching implemented and validated. Correct room assignments with 6.5% confidence margin over next-best.
 
 Determine which panorama was taken inside which physical room by matching single-room footprints (from panos) against a multi-room floorplan (from point cloud).
 
@@ -24,16 +24,29 @@ Determine which panorama was taken inside which physical room by matching single
 
 ### 1.3 Scale Estimation and Polygon Matching ✅
 
+**Legacy (RoomFormer ↔ LGT-Net)**:
 - `polygon_scale_calculation.py` — Consensus pixel-to-meter scale via histogram voting over pairwise corner distances between RoomFormer (pixels) and LGT-Net (meters) polygons.
 - `align_polygons_demo5.py` — Hungarian algorithm matching: tests candidate scales, 4 discrete rotations (0/90/180/270 deg), brute-force vertex-to-vertex snapping. Outputs `global_alignment.json` with per-pair transformation parameters and match errors.
 
-### 1.4 Improve Footprint Quality with SAM3 🟡
+**Current (SAM3 ↔ SAM3)**:
+- `align_polygons_demo6.py` — **Canonical jigsaw matching**. Matches SAM3 pano footprints to SAM3 density-image room polygons. Two-stage pipeline:
+  - **Stage 1**: Enumerate all M^N pano→room assignments (e.g., 8 for 3 panos × 2 rooms). For each, optimize a shared scale + per-pano (rotation, translation) using `scipy.optimize.differential_evolution` with true IoU scoring (intersection/union prevents scale collapse). Pick the assignment with highest total IoU.
+  - **Stage 2**: Refine placement with OBB long-axis alignment (aligns pano shape to room shape), dense translation grid, non-overlap penalty for multiple panos in the same room, largest pano placed first (strongest shape constraint).
+  - Outputs `demo6_alignment.json` (room assignment, scale, per-pano rotation/position) + `demo6_alignment.png`
+- `polygon_scale_calculation_v2.py` — Three consensus-scale methods (edge distances, Procrustes, area ratio). Used by demo6 legacy modes.
+- `SAM3_mask_to_polygons.py` — Converts density image SAM3 masks to world-meter polygon coordinates.
 
-Both LGT-Net and RoomFormer footprints have limited accuracy. Investigate using Segment Anything Model 3 for extracting room boundaries from:
-- Panoramic images (replacing or augmenting LGT-Net footprints)
-- Density images (replacing or augmenting RoomFormer polygons)
+**Key findings** from scale exploration:
+- Blind statistical scale methods (edge ratios, Procrustes, area) give unreliable results (0.13 to 1.63) — too few polygons for histogram consensus.
+- The enumerate+optimize approach reliably finds scale ≈ 1.2 and correct room assignments (validated against ground truth poses from Phase 2).
+- True IoU scoring is essential — containment-only scoring causes scale collapse (optimizer shrinks polygons to trivially fit).
+- Coordinate convention: SAM3 pano `layout_corners` [x, z_flipped] map directly to density image [map_x, map_y] (both use "backward" y-direction). No additional Z-flip needed.
 
-**Current state**: Panoramic footprint extraction is production-ready. SAM3 floor/ceiling fusion with height correction produces clean Manhattan-regularized polygons on all 6 test panoramas. Density image approaches still pending evaluation.
+### 1.4 Improve Footprint Quality with SAM3 ✅
+
+Both LGT-Net and RoomFormer footprints have limited accuracy. SAM3 produces better footprints from both panoramic images and density images.
+
+**Current state**: Both panoramic and density-image footprint extraction are production-ready. SAM3 footprints integrated into the polygon matching pipeline via `align_polygons_demo6.py`.
 
 #### Panoramic image approaches (replacing/augmenting LGT-Net) ✅
 
@@ -76,7 +89,7 @@ All SAM3 scripts require `conda run -n sam3`.
 - ~~Does SAM3 on density images outperform RoomFormer's learned polygon detection?~~ → Multiple approaches tested; results need quantitative comparison against RoomFormer baselines
 - ~~What prompting strategy works best?~~ → For panoramas: "floor" + "ceiling" + "column" prompts with fusion. For density images: "floor plan" on CLAHE-inverted images appears most promising.
 
-**Next**: Integrate SAM3 panoramic footprints into the polygon matching pipeline (`align_polygons_demo5.py`) as an alternative/complement to LGT-Net. Evaluate density image approaches quantitatively against RoomFormer.
+~~**Next**: Integrate SAM3 panoramic footprints into the polygon matching pipeline~~ → ✅ Done. `align_polygons_demo6.py` implements SAM3-to-SAM3 jigsaw matching with enumerate+optimize approach. Correct room assignments and scale ≈ 1.2 validated against ground truth poses.
 
 ---
 
@@ -246,67 +259,86 @@ Compares colorized PLY against original scanner RGB (Leica BLK360 G1 — same ca
 
 ---
 
-## Phase 4: Meshing ⬜
+## Phase 4: Meshing ✅
 
-**Status**: ⬜ Not implemented. No meshing code exists in the repository.
+**Status**: ✅ Implemented and validated. Balanced pipeline runs in ~13 min, produces 15 MB GLB.
 
-Convert the colored point cloud into a watertight triangle mesh suitable for real-time rendering and measurement.
+Convert the colored point cloud into a UV-textured triangle mesh for real-time rendering and measurement.
 
-### 4.1 Surface Reconstruction ⬜
+### 4.1 Surface Reconstruction ✅
 
-Candidate approaches:
-- **Poisson surface reconstruction** (Open3D `create_from_point_cloud_poisson`) — requires oriented normals, produces watertight mesh, good for smooth indoor surfaces
-- **Ball-pivoting algorithm** — better for preserving sharp edges (walls, furniture)
-- **Alpha shapes** — already partially used in `point_cloud_geometry_baker_V3.py` for boundary extraction
+**Approach**: Tiled Screened Poisson reconstruction (Open3D). Selected over Ball Pivoting (unreliable with 7-85 mm density variation) and Gaussian Splatting (not geometrically accurate).
 
-### 4.2 Texture Baking ⬜
+**Pipeline** (`mesh_reconstruction.py` — 17-stage orchestrator):
+1. Load colored PLY → 5 mm voxel downsample (8.8M → 5.7M points)
+2. Spatial chunking: 6×6 m XY tiles, 1 m overlap → 8 tiles
+3. Per-tile: normals → Poisson depth 9 → density trim → ownership trim → save to disk
+4. Merge tiles → 3.2M triangles (full-res PLY saved for CloudCompare)
+5. Decimate to 500K triangles for textured GLB
+6. xatlas UV unwrap → bake 4096×4096 texture atlas (KNN=4 IDW from full 8.8M cloud) → dilate → export GLB
 
-Transfer per-vertex colors to a UV-mapped texture atlas:
-- Generate UV parameterization for the mesh
-- Bake vertex colors (or direct panorama projections) into texture images
-- Produce glTF/GLB format for web consumption
+**Key design decisions**:
+- Poisson depth 9 (~17 mm voxel): flat surface accuracy ~3-5 mm, corner rounding ~15-20 mm. Meets 1 cm wall-to-wall tolerance.
+- Full-res PLY (3.2M tris) preserved for measurement accuracy. Decimated 500K-tri mesh used only for textured GLB (visual quality).
+- Two-load pattern: original cloud freed after downsample, reloaded for texture baking. Peak RAM ~4-6 GB.
+- Disk-based tile caching prevents OOM on 32 GB machine with ~15 GB free.
 
-### 4.3 Mesh Optimization ⬜
+**Scripts**: `src/meshing/mesh_reconstruction.py` (orchestrator), `src/meshing/mesh_utils.py` (library), `src/meshing/export_gltf.py` (GLB export)
 
-- Decimation to reduce triangle count for web rendering
-- Normal smoothing for visual quality
-- Hole filling for scanning gaps
+**Test case results** (tmb_office_one_corridor_dense, 8.8M points):
+- Runtime: ~13 min (Poisson ~11 min, UV/bake ~2 min)
+- GLB: 15.2 MB, 500K triangles, 4096×4096 texture atlas
+- Full-res PLY: 120 MB, 3.2M triangles
+- Extent: 10.57 × 21.53 × 3.84 m (matches input)
+- Peak RAM: ~6 GB, no OOM
+
+### 4.2 Future Improvements 🟡
+
+- **Runtime optimization**: Per-tile Poisson dominates at ~11 min. Could parallelize tiles or reduce point count further.
+- **Texture baking performance**: Current Python per-face loop is slow at scale. Vectorizing with numpy or using GPU-based baking could cut time significantly.
+- **Draco compression**: Optional post-processing via `gltf-transform draco` CLI reduces GLB from ~15 MB to ~3-5 MB. Not yet integrated into pipeline.
+
+**Design spec**: `docs/superpowers/specs/2026-03-23-balanced-mesh-reconstruction-design.md`
 
 ---
 
-## Phase 5: Virtual Tour with Measurement ⬜
+## Phase 5: End-to-End Desktop App ⬜
 
-**Status**: ⬜ Not implemented. No web framework or viewer code exists (despite the repository name).
+**Status**: ⬜ Designed. Implementation plans ready.
 
-Build an interactive web-based virtual tour from the textured mesh, with real-world measurement capability.
+Two-app desktop system: **Electron** (pipeline orchestrator + 3D preview) + **Unity** (virtual tour + measurement). Designed 2026-03-24.
 
-### 5.1 3D Viewer Setup ⬜
+**Design spec**: `docs/superpowers/specs/2026-03-24-desktop-app-design.md`
 
-Technology candidates:
-- **Potree** — purpose-built for large point clouds, supports measurements natively
-- **Three.js** — general-purpose WebGL, requires more custom code but maximum flexibility
-- **3D Tiles / CesiumJS** — good for very large scenes with level-of-detail
+**Architecture**: Electron app (React + TypeScript + Three.js) handles file management, pipeline orchestration with animated stage visualization, 3D preview, and project management. Unity app (C#, GLTFast) provides first-person navigation with collision, measurement tools, and minimap. Electron launches Unity .exe as subprocess, passing GLB path via CLI.
 
-### 5.2 Virtual Tour Navigation ⬜
+**Three entry points**:
+1. **Full Pipeline** — uncolored PLY + panoramas → all pipeline stages with animation → confirmation gate → colorize → mesh → virtual tour
+2. **Mesh Only** — colored PLY → preview → select quality tier → mesh → virtual tour
+3. **Tour Only** — existing GLB → launch Unity directly
 
-- Hotspot-based navigation between panorama viewpoints
-- Smooth camera transitions between rooms
-- Minimap showing current position on floorplan (reuse RoomFormer output)
-- Optional: free-fly camera mode through the 3D model
+### 5.1 Python Script Modifications ⬜
 
-### 5.3 Measurement Tool ⬜
+Add `--config <json>` CLI support and `[PROGRESS]` stdout protocol to all 11 pipeline scripts. Shared `config_loader.py` utility. Required before Electron integration.
 
-Since the point cloud is from a TLS (terrestrial laser scanner), the geometry is metrically accurate:
-- Point-to-point distance measurement (click two points, display distance in meters)
-- Area measurement (select polygon on surface)
-- Height measurement (vertical distance between two horizontal planes)
-- Export measurements as CSV/JSON
+**Plan**: `docs/superpowers/plans/2026-03-24-python-script-modifications.md` (14 tasks)
 
-### 5.4 Deployment ⬜
+### 5.2 Electron App ⬜
 
-- Static site hosting (the viewer is client-side)
-- Data pipeline: mesh + textures -> 3D Tiles or Potree octree format
-- Progressive loading for large scenes
+Pipeline hub with React UI: home screen (3 entry cards + recent projects), pipeline view (sidebar + animated canvas), confirmation gate (draggable polygon correction + re-run), Three.js 3D preview (OBJ/PLY/GLB), project management (JSON store, per-project directories).
+
+**Plan**: `docs/superpowers/plans/2026-03-24-electron-app.md` (28 tasks)
+
+### 5.3 Unity Virtual Tour ⬜
+
+First-person viewer: GLB runtime loading (GLTFast), WASD + mouse look with CharacterController collision, top toolbar measurement tools (point-to-point, wall-to-wall, height), minimap with density image + player position, mesh info panel.
+
+**Plan**: `docs/superpowers/plans/2026-03-24-unity-virtual-tour.md` (16 tasks)
+
+### 5.4 Execution Order
+
+1. Python Script Modifications (smallest, unblocks Electron integration)
+2. Electron App + Unity App (can be built in parallel after step 1)
 
 ---
 
@@ -314,8 +346,8 @@ Since the point cloud is from a TLS (terrestrial laser scanner), the geometry is
 
 | Phase | Description | Status | Key Scripts |
 |-------|------------|--------|-------------|
-| 1 | Room-level pano assignment (jigsaw puzzle) | 🟡 Core implemented, accuracy limited | `align_polygons_demo5.py`, `LGT-Net_inference_demo2.py`, `RoomFormer_inference.py` |
-| 1.4 | SAM3 for better footprints | 🟡 Pano extraction production-ready, density image pending | `SAM3_pano_footprint_extraction.py`, `SAM3_footprint_comparison.py`, `SAM3_room_extraction_test.py` |
+| 1 | Room-level pano assignment (jigsaw puzzle) | ✅ SAM3-to-SAM3 matching validated | `align_polygons_demo6.py`, `SAM3_pano_footprint_extraction.py`, `SAM3_room_segmentation.py` |
+| 1.4 | SAM3 for better footprints | ✅ Both pano and density image extraction production-ready | `SAM3_pano_footprint_extraction.py`, `SAM3_mask_to_polygons.py`, `SAM3_room_segmentation.py` |
 | 2.1 | 3D feature extraction | ✅ Implemented | `point_cloud_geometry_baker_V4.py`, `cluster_3d_lines.py`, `line_clustering_3d.py` |
 | 2.2 | 2D feature extraction | ✅ Implemented | `image_feature_extractionV2.py`, `pano_line_detector.py`, `line_analysis.py` |
 | 2.3 | Single-room pose estimation | ✅ Implemented, validated | `pose_estimation_pipeline.py` + library modules |
@@ -324,8 +356,9 @@ Since the point cloud is from a TLS (terrestrial laser scanner), the geometry is
 | 2.6 | Consolidate pose codebase | ✅ Done | — |
 | 2.7 | Jigsaw-informed improvements | 🟡 B+D done, A+C not started | `experiment_polygon_prior.py`, `experiment_local_linefilter.py` |
 | 3 | Point cloud coloring | ✅ Implemented, validated | `colorize_point_cloud.py`, `evaluate_colorization.py` + library modules |
-| 4 | Meshing | ⬜ Not started | — |
-| 5 | Virtual tour + measurement | ⬜ Not started | — |
+| 4 | Meshing | ✅ Balanced pipeline, 13 min, 15 MB GLB | `mesh_reconstruction.py`, `mesh_utils.py`, `export_gltf.py` |
+| 4.2 | Meshing improvements | 🟡 Runtime optimization, Draco compression | — |
+| 5 | End-to-end desktop app (Electron + Unity) | ⬜ Designed, plans ready | `docs/superpowers/specs/2026-03-24-desktop-app-design.md` |
 
 ---
 
@@ -333,7 +366,7 @@ Since the point cloud is from a TLS (terrestrial laser scanner), the geometry is
 
 ```
 Phase 1 (room assignment) ──┐
-                             ├──> Phase 2.5 (multi-room pose) ──> Phase 2.7 (jigsaw improvements) ──> Phase 3 (coloring) ✅ ──> Phase 4 (meshing) ──> Phase 5 (virtual tour)
+                             ├──> Phase 2.5 (multi-room pose) ──> Phase 2.7 (jigsaw improvements) ──> Phase 3 (coloring) ✅ ──> Phase 4 (meshing) ✅ ──> Phase 5 (Unity app)
 Phase 2.1-2.3 (single-room) ┘
 ```
 
@@ -342,16 +375,24 @@ Phase 5.3 (measurement) depends on Phase 4 (mesh) or can work directly on the po
 
 ---
 
-## Next Steps (as of 2026-03-21)
+## Next Steps (as of 2026-03-24)
 
-1. ~~**Evaluate SAM3 footprint quality** (Phase 1.4)~~ — ✅ Panoramic footprint extraction is production-ready. `SAM3_pano_footprint_extraction.py` produces Manhattan-regularized polygons via floor/ceiling fusion with height correction. Validated on 6 test panoramas. Three fusion variants compared; per-column optimistic (Approach A) selected.
+1. ~~**Evaluate SAM3 footprint quality** (Phase 1.4)~~ — ✅ Done.
 
-2. **Integrate SAM3 footprints into polygon matching** (Phase 1.3 → 1.4) — Feed SAM3 `layout.json` polygons from `SAM3_pano_footprint_extraction.py` into `align_polygons_demo5.py` as an alternative/complement to LGT-Net footprints. Compare matching accuracy.
+2. ~~**Integrate SAM3 footprints into polygon matching** (Phase 1.3 → 1.4)~~ — ✅ Done. `align_polygons_demo6.py` implements enumerate+optimize jigsaw matching. Correct room assignments and scale ≈ 1.2 validated against ground truth poses.
 
-3. **Update the production multi-room pose estimation pipeline** (Phase 2.7 → 2.5) — Integrate the validated local 3D line filtering (Voronoi-based, from `experiment_local_linefilter.py`) into `multiroom_pose_estimation.py`. The experiment proved that filtering 3D lines per-panorama eliminates cross-room false minima (office1: 2.3m error → sub-cm).
+3. **Wire demo6 output into multiroom_pose_estimation.py** (Phase 1 → 2.5) — `multiroom_pose_estimation.py` currently reads `global_alignment.json` from the RoomFormer path. Update it to optionally read `demo6_alignment.json` from `data/sam3_room_segmentation/<map>/` for Voronoi-based local line filtering.
 
-4. ~~**Color the point cloud** (Phase 3)~~ — ✅ Done. Colorization pipeline implemented with depth-buffer occlusion, bilinear sampling, IDW multi-pano blending. Validated against scanner ground truth (median Delta-E 2.47, 77.7% below 5).
+4. **Update the production multi-room pose estimation pipeline** (Phase 2.7 → 2.5) — Integrate the validated local 3D line filtering (Voronoi-based, from `experiment_local_linefilter.py`) into `multiroom_pose_estimation.py`. The experiment proved that filtering 3D lines per-panorama eliminates cross-room false minima (office1: 2.3m error → sub-cm).
 
-5. **Start meshing** (Phase 4) — Convert the colored point cloud into a triangle mesh (Poisson or ball-pivoting), bake textures, export as glTF for web rendering.
+5. ~~**Color the point cloud** (Phase 3)~~ — ✅ Done.
 
-6. **Start developing the virtual tour** (Phase 5) — Build the interactive web-based viewer with measurement capability. Evaluate technology candidates (Potree, Three.js, 3D Tiles).
+6. ~~**Start meshing** (Phase 4)~~ — ✅ Done. Balanced pipeline: tiled Poisson depth 9, 5 mm downsample, 500K-tri decimated GLB with 4096 texture atlas. 13 min runtime, 15 MB GLB. Full-res 3.2M-tri PLY preserved.
+
+7. **Improve meshing runtime** (Phase 4.2) — Per-tile Poisson dominates at ~11 min. Explore parallelization, further point reduction, or vectorized texture baking.
+
+8. **Build end-to-end desktop app** (Phase 5) — Design complete. Three implementation plans ready:
+   - Python script modifications (14 tasks) — add `--config` + `[PROGRESS]` to all pipeline scripts
+   - Electron app (28 tasks) — pipeline hub with React UI, Three.js preview, project management
+   - Unity virtual tour (16 tasks) — first-person navigation, measurement tools, minimap
+   - Execute Python plan first, then Electron + Unity in parallel.

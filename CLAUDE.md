@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**scan2measure-webframework** is a multi-stage 3D reconstruction pipeline for indoor building floorplans and room layouts. It takes raw point clouds and panoramic images as input and produces calibrated 2D/3D room geometry, camera poses, and scale estimates.
+**scan2measure-webframework** is a multi-stage 3D reconstruction pipeline for indoor building measurement. It takes raw TLS point clouds and panoramic images as input, estimates camera poses, colors the point cloud, and produces a UV-textured GLB mesh for a virtual tour with measurement capability. The end goal is a Unity-based desktop app orchestrating the full pipeline.
 
 ## Source Directory Structure
 
@@ -41,8 +41,11 @@ src/
 │   └── xdf_distance.py
 │
 ├── floorplan/              # Scale estimation & polygon alignment
-│   ├── align_polygons_demo5.py
-│   └── polygon_scale_calculation.py
+│   ├── align_polygons_demo6.py          # SAM3-to-SAM3 jigsaw (enumerate + optimize)
+│   ├── align_polygons_demo5.py          # Legacy: Hungarian matching (RoomFormer ↔ LGT-Net)
+│   ├── polygon_scale_calculation_v2.py  # Three scale methods (edge, Procrustes, area)
+│   ├── polygon_scale_calculation.py     # Legacy: histogram consensus scale
+│   └── SAM3_mask_to_polygons.py         # Density image masks → world-meter polygons
 │
 ├── visualization/          # All rendering & debug visualization
 │   ├── visualize_pose.py
@@ -54,6 +57,11 @@ src/
 │   ├── projection.py              # Equirectangular projection math
 │   ├── visibility.py              # Depth-buffer occlusion test
 │   └── color_sampling.py          # Bilinear sampling + multi-pano IDW blending
+│
+├── meshing/               # Point cloud → textured GLB mesh (parallel, quality-tiered)
+│   ├── mesh_reconstruction.py     # Orchestrator: 17-stage pipeline with quality tiers (preview/balanced/high)
+│   ├── mesh_utils.py              # Library: normals, Poisson, tiling, trimming, UV unwrap, texture baking + parallel workers
+│   └── export_gltf.py             # GLB export with PBR texture + metric metadata injection
 │
 ├── utils/                  # Shared math & geometry primitives
 │   └── sphere_geometry.py
@@ -135,6 +143,7 @@ python src/features_2d/image_feature_extractionV2.py           # Stage 4: Per-pa
 python src/pose_estimation/multiroom_pose_estimation.py        # Stage 5: Multi-pano pose estimation (3D precompute once, 2D per-pano)
 python src/experiments/experiment_local_linefilter.py          # Stage 5b (optional): Voronoi-filtered pose re-estimation (saves R+t)
 python src/colorization/colorize_point_cloud.py                # Stage 6: Color point cloud from panoramas using poses
+conda run -n scan_env python src/meshing/mesh_reconstruction.py  # Stage 7: Colored PLY → textured GLB mesh (quality-tiered: ~6/11/20 min)
 ```
 
 **In-house path (V3):**
@@ -154,7 +163,8 @@ Stage 5: `pose_estimation/pose_estimation_pipeline.py` — canonical FGPL-faithf
 Supporting scripts:
 ```bash
 python src/visualization/visualize_matching.py                 # Generate 2-panel overlay PNGs for pose inspection (supports V1 + V2)
-python src/floorplan/align_polygons_demo5.py                   # Hungarian algorithm polygon matching
+python src/floorplan/align_polygons_demo6.py                   # SAM3-to-SAM3 jigsaw matching (enumerate + optimize)
+python src/floorplan/align_polygons_demo5.py                   # Legacy: Hungarian algorithm polygon matching
 python src/preprocessing/map_RoomFormer_results_to_3d.py       # Project 2D floorplan polygons back to 3D point cloud
 python src/segmentation/LGT-Net_inference_demo2.py             # Panoramic layout prediction via LGT-Net
 python src/preprocessing/ply_to_xyz.py                         # Convert PLY to plain-text XYZ (preprocessing for 3DLineDetection)
@@ -251,13 +261,33 @@ data/raw_point_cloud/*.ply + data/pano/raw/*.jpg + local_filter_results.json (R+
     (calls colorization/projection.py → visibility.py → color_sampling.py)
   → data/textured_point_cloud/<map>_textured.ply
 
+=== Meshing ===
+
+data/textured_point_cloud/<map>_textured.ply
+  → meshing/mesh_reconstruction.py  (17-stage parallel pipeline, quality-tiered)
+    Quality tiers (set QUALITY_TIER in config):
+      "preview"  — Poisson depth 7, 15mm voxel, 2048 atlas, 250K tris (~6 min)
+      "balanced" — Poisson depth 8, 10mm voxel, 4096 atlas, 500K tris (~11 min) [default]
+      "high"     — Poisson depth 9,  5mm voxel, 4096 atlas, 500K tris (~20 min)
+    Stage 1-2: Load + voxel downsample
+    Stage 3-9: Tiled Poisson (6x6m tiles, 1m overlap) — parallel via ProcessPoolExecutor (spawn)
+    Stage 10-11: Merge → save full-res vertex-colored PLY
+    Stage 12: Decimate for textured GLB
+    Stage 13-16: Reload full cloud → xatlas UV unwrap → bake atlas (KNN=4, parallel) → dilate
+    Stage 17: Export GLB with metric metadata
+  → data/mesh/<map>/
+    <name>.glb                    (~15 MB, UV-textured)
+    <name>_vertex_colored.ply     (full-res, vertex-colored)
+    <name>_metadata.json          (pipeline parameters + stats + quality_tier)
+
 === Legacy visualization ===
 
 visualization/visualize_matching.py  (loads camera_pose.json → 2-panel debug PNGs, supports V1 + V2 formats)
 
 === Scale estimation ===
 
-floorplan/align_polygons_demo5.py + floorplan/polygon_scale_calculation.py  (align floorplans, output scale)
+floorplan/align_polygons_demo6.py  (SAM3 jigsaw: enumerate assignments + optimize scale/rotation/translation)
+  → data/sam3_room_segmentation/<map>/  (demo6_alignment.json + demo6_alignment.png)
 ```
 
 ### Key Scripts
@@ -289,9 +319,15 @@ floorplan/align_polygons_demo5.py + floorplan/polygon_scale_calculation.py  (ali
 | `colorization/visibility.py` | Library: `compute_visibility_depth_buffer`. Rasterizes to low-res depth buffer, marks points visible if within margin of frontmost depth. O(N) numpy |
 | `colorization/color_sampling.py` | Library: `sample_colors_bilinear` (scipy `map_coordinates` with horizontal wraparound padding), `blend_colors_idw` (inverse-distance-weighted accumulation across panoramas) |
 | `colorization/evaluate_colorization.py` | Ground-truth evaluation: compares colorized PLY against original scanner RGB. RGB L2 distance, CIEDE2000 Delta-E (perceptual), per-channel bias, error heatmap PLY output (green→red gradient, blue=uncolored) |
+| `meshing/mesh_reconstruction.py` | **Orchestrator**. 17-stage parallel pipeline with quality tiers (preview/balanced/high). Tile processing parallelized via `ProcessPoolExecutor` (spawn context). Texture baking also parallel. `QUALITY_TIER` config selects Poisson depth (7/8/9), voxel size, atlas resolution, and target triangles. Balanced tier: ~11 min on 32-core system. Timing breakdown printed at end |
+| `meshing/mesh_utils.py` | Library: `estimate_normals`, `poisson_reconstruct`, `remove_low_density`, `transfer_vertex_colors`, `_process_single_tile` (parallel worker), `process_tiles_parallel`, `compute_tile_grid`, `extract_tile_points`, `trim_to_ownership_region`, `merge_tile_meshes`, `uv_unwrap_mesh`, `_bake_face_chunk` (parallel worker), `bake_texture_atlas` (supports `max_workers`), `dilate_texture` |
+| `meshing/export_gltf.py` | `export_textured_glb` (trimesh PBR material + `_inject_gltf_metadata` for metric unit/scale in asset.extras), `export_vertex_color_ply` (Open3D PLY writer) |
 | `legacy/PnL_solver.py` | Legacy ICP module (unused by active pipeline, kept for reference). Contains `refine_pose_icp()` (V1) and `refine_pose_full()` (V2) |
-| `floorplan/align_polygons_demo5.py` | Hungarian algorithm polygon matching (RoomFormer 2D ↔ LGT-Net 3D) |
-| `floorplan/polygon_scale_calculation.py` | Consensus scale estimation via histogram peak detection over pairwise polygon corner distances |
+| `floorplan/align_polygons_demo6.py` | **Canonical**. SAM3-to-SAM3 jigsaw matching. Stage 1: enumerate all pano→room assignments, optimize shared scale + per-pano rotation/translation via `differential_evolution` (true IoU scoring). Stage 2: OBB long-axis alignment, dense translation grid, non-overlap penalty, largest pano placed first. Outputs `demo6_alignment.json` + visualization |
+| `floorplan/polygon_scale_calculation_v2.py` | Three consensus-scale methods: A=edge distances, B=Procrustes, C=area ratio. Used by demo6 legacy modes (`--compare`) |
+| `floorplan/align_polygons_demo5.py` | Legacy: Hungarian matching (RoomFormer 2D ↔ LGT-Net 3D) |
+| `floorplan/polygon_scale_calculation.py` | Legacy: histogram consensus scale |
+| `experiments/SAM3_mask_to_polygons.py` | Converts SAM3 density image masks to world-meter polygons via `pixels_to_world_meters()`. Outputs `*_polygons.json` with `vertices_world_meters` per room |
 | `visualization/visualize_matching.py` | 22 side-by-side PNGs per panorama. V2 layout: left = 2D lines (green) + projected 3D wireframe (cyan) overlay, right = matched intersection pairs colored by group. Falls back to V1 layout (separate 2D/3D panels) when V2 keys absent |
 | `preprocessing/map_RoomFormer_results_to_3d.py` | Inverse-projects RoomFormer 2D polygons to world coordinates, segments point cloud by room |
 | `features_2d/pano_processing_virtual_camerasV2.py` | Extracts 22 perspective crops from equirectangular panorama (matches renderer's spherical tiling) |
@@ -413,7 +449,8 @@ data/
 ├── sam3_pano_processing/                 # SAM3 room polygons from panoramas
 │   ├── <stem>/                           #   Per-pano: layout.json + debug.png (from footprint_extraction)
 │   └── footprint_comparison/             #   Three-way fusion comparison outputs
-└── textured_point_cloud/                 # Colorized point cloud PLY output from colorize_point_cloud.py
+├── textured_point_cloud/                 # Colorized point cloud PLY output from colorize_point_cloud.py
+└── mesh/<map>/                           # Meshing output: .glb (textured), _vertex_colored.ply (full-res), _metadata.json
 ```
 
 ### External Subdirectories
