@@ -46,7 +46,8 @@ if str(sam3_repo_path) not in sys.path:
 if str(script_dir) not in sys.path:
     sys.path.insert(0, str(script_dir))
 
-os.environ["HF_TOKEN"] = "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"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import SAM3_pano_processing as spp
 

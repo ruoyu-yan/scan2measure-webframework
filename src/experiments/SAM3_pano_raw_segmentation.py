@@ -24,13 +24,14 @@ import matplotlib.patches as mpatches
 # PATH SETUP
 # ---------------------------------------------------------
 script_dir = Path(__file__).resolve().parent
-project_root = script_dir.parent
+project_root = script_dir.parent.parent
 sam3_repo_path = project_root / "sam3"
 
 if str(sam3_repo_path) not in sys.path:
     sys.path.insert(0, str(sam3_repo_path))
 
-os.environ["HF_TOKEN"] = "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"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
