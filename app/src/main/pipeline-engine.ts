@@ -62,7 +62,7 @@ export class PipelineEngine {
       this.stderrBuffer = [];
 
       const args = [
-        "run", "--no-banner", "-n", config.condaEnv,
+        "run", "-n", config.condaEnv,
         "python", config.scriptPath,
         "--config", config.configJsonPath,
       ];

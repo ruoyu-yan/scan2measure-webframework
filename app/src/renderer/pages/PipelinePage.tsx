@@ -1,8 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import StageSidebar from "../components/StageSidebar";
 import StageCanvas from "../components/StageCanvas";
-import QualityTierSelect from "../components/QualityTierSelect";
+import type { ResolvedArtifacts } from "../components/StageCanvas";
+import Filmstrip from "../components/Filmstrip";
 import { useProject } from "../hooks/useProject";
 import { usePipeline } from "../hooks/usePipeline";
 import { FULL_PIPELINE_STAGES, MESH_ONLY_STAGES } from "../../shared/constants";
@@ -28,6 +29,73 @@ export default function PipelinePage() {
 
   const currentStageConfig = stages[state.currentStage];
   const currentStatus: StageStatus = state.stages[state.currentStage] ?? "pending";
+
+  // -- Artifact resolution state --
+  const [resolvedMap, setResolvedMap] = useState<Map<string, ResolvedArtifacts>>(new Map());
+  const [filmstripThumbs, setFilmstripThumbs] = useState<Map<string, string>>(new Map());
+  const [filmstripSelectedIndex, setFilmstripSelectedIndex] = useState<number | null>(null);
+
+  // Track which stages we have already resolved to avoid redundant calls
+  const resolvedStagesRef = useRef<Set<string>>(new Set());
+
+  // Resolve artifacts for a given stage
+  const resolveStage = useCallback(async (stageId: string) => {
+    if (!projectId) return;
+    try {
+      const result = await window.electronAPI.resolveArtifacts(projectId, stageId) as {
+        stageId: string;
+        artifacts: ResolvedArtifacts;
+      };
+      if (result.artifacts && Object.keys(result.artifacts).length > 0) {
+        setResolvedMap((prev) => {
+          const next = new Map(prev);
+          next.set(stageId, result.artifacts);
+          return next;
+        });
+
+        // Load thumbnail for filmstrip (first image)
+        const imgs = result.artifacts.images;
+        if (imgs && imgs.length > 0) {
+          try {
+            const thumb = await window.electronAPI.readImage(imgs[0]);
+            if (thumb) {
+              setFilmstripThumbs((prev) => {
+                const next = new Map(prev);
+                next.set(stageId, thumb);
+                return next;
+              });
+            }
+          } catch {
+            // thumbnail load failed, skip
+          }
+        }
+      }
+    } catch {
+      // resolve failed, skip silently
+    }
+  }, [projectId]);
+
+  // Resolve artifacts when a stage completes, or when a confirmation stage becomes current
+  useEffect(() => {
+    state.stages.forEach((status, i) => {
+      if (status === "complete") {
+        const sid = stages[i].id;
+        if (!resolvedStagesRef.current.has(sid)) {
+          resolvedStagesRef.current.add(sid);
+          resolveStage(sid);
+        }
+      }
+    });
+    // Also resolve for the current stage if it's a confirmation gate (no script to run)
+    if (
+      currentStageConfig?.viewType === "confirmation" &&
+      currentStatus === "pending" &&
+      !resolvedStagesRef.current.has(currentStageConfig.id)
+    ) {
+      resolvedStagesRef.current.add(currentStageConfig.id);
+      resolveStage(currentStageConfig.id);
+    }
+  }, [state.stages, stages, resolveStage, currentStageConfig, currentStatus]);
 
   // Update project status when pipeline state changes
   useEffect(() => {
@@ -74,18 +142,49 @@ export default function PipelinePage() {
     status: state.stages[i],
   }));
 
-  // Determine artifacts for current stage based on project paths
+  // Determine the stage to display: either filmstrip selection or current stage
+  const displayStageIndex = filmstripSelectedIndex !== null
+    ? filmstripSelectedIndex
+    : state.currentStage;
+  const displayStageConfig = stages[displayStageIndex];
+  const displayStatus: StageStatus = filmstripSelectedIndex !== null
+    ? (state.stages[filmstripSelectedIndex] ?? "pending")
+    : currentStatus;
+
+  // Determine artifacts for displayed stage based on project paths
   const artifacts = {
     densityImagePath: project.outputs.densityImage,
     glbPath: project.outputs.meshGlb,
-    // Additional artifact paths would be resolved from the project output directory
-    // based on the current stage id and STAGE_OUTPUT_DIRS mapping
   };
 
-  // Show quality tier selector before meshing stage
-  const isMeshingStage = currentStageConfig?.id === "meshing";
-  const isStageActive = currentStatus === "active";
-  const showQualitySelect = isMeshingStage && !isStageActive;
+  // Provide resolved artifacts for completed stages and confirmation gates
+  const displayResolvedArtifacts =
+    displayStageConfig && (displayStatus === "complete" || displayStageConfig.viewType === "confirmation")
+      ? resolvedMap.get(displayStageConfig.id)
+      : undefined;
+
+  // When current stage is running, find the previous completed stage's artifacts
+  // so StageCanvas can show them instead of an empty screen
+  let prevStageId: string | undefined;
+  let prevResolvedArtifacts: ResolvedArtifacts | undefined;
+  if (displayStatus === "active" && displayStageIndex > 0) {
+    for (let i = displayStageIndex - 1; i >= 0; i--) {
+      const sid = stages[i].id;
+      const ra = resolvedMap.get(sid);
+      if (ra && Object.keys(ra).length > 0) {
+        prevStageId = sid;
+        prevResolvedArtifacts = ra;
+        break;
+      }
+    }
+  }
+
+  // Build filmstrip stage data
+  const filmstripStages = stages.map((s, i) => ({
+    id: s.id,
+    name: s.name,
+    status: state.stages[i] as string,
+  }));
 
   return (
     <div className="pipeline-page">
@@ -96,26 +195,33 @@ export default function PipelinePage() {
       />
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {showQualitySelect && (
-          <div style={{ padding: "12px 24px", borderBottom: "1px solid var(--bg-card)" }}>
-            <QualityTierSelect
-              value={state.qualityTier}
-              onChange={setQualityTier}
-              disabled={isStageActive}
-            />
-          </div>
-        )}
+
+        <Filmstrip
+          stages={filmstripStages}
+          completedArtifacts={filmstripThumbs}
+          onSelect={(idx) => {
+            // Toggle: clicking already-selected goes back to current stage
+            setFilmstripSelectedIndex((prev) => (prev === idx ? null : idx));
+          }}
+          selectedIndex={filmstripSelectedIndex}
+        />
 
         <StageCanvas
-          viewType={currentStageConfig?.viewType || "progress"}
-          stageStatus={currentStatus}
-          stageName={currentStageConfig?.name || ""}
-          stageDescription={currentStageConfig?.description || ""}
-          elapsedMs={state.elapsedMs}
-          progress={state.progress}
-          logLines={state.logLines}
-          stderrTail={state.stderrTail}
+          viewType={displayStageConfig?.viewType || "progress"}
+          stageId={displayStageConfig?.id || ""}
+          stageStatus={displayStatus}
+          stageName={displayStageConfig?.name || ""}
+          stageDescription={displayStageConfig?.description || ""}
+          elapsedMs={filmstripSelectedIndex !== null ? 0 : state.elapsedMs}
+          progress={filmstripSelectedIndex !== null ? null : state.progress}
+          logLines={filmstripSelectedIndex !== null ? [] : state.logLines}
+          stderrTail={filmstripSelectedIndex !== null ? "" : state.stderrTail}
           artifacts={artifacts}
+          resolvedArtifacts={displayResolvedArtifacts}
+          prevStageId={prevStageId}
+          prevResolvedArtifacts={prevResolvedArtifacts}
+          qualityTier={state.qualityTier}
+          onQualityTierChange={setQualityTier}
           onConfirm={confirm}
           onRetry={retry}
           onBack={() => navigate("/")}

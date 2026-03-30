@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, protocol, net } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
@@ -16,6 +16,11 @@ let projectStore: ProjectStore;
 
 initLogger(PROJECT_ROOT);
 logInfo("app", `Project root: ${PROJECT_ROOT}`);
+
+// Register custom protocol for serving local files to the renderer
+protocol.registerSchemesAsPrivileged([
+  { scheme: "local-file", privileges: { standard: true, supportFetchAPI: true, stream: true } },
+]);
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -47,7 +52,14 @@ function createWindow() {
   pipelineEngine = new PipelineEngine(mainWindow);
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Handle local-file:// protocol to serve local files to renderer
+  protocol.handle("local-file", (request) => {
+    const filePath = decodeURIComponent(request.url.replace("local-file://", ""));
+    return net.fetch("file://" + filePath);
+  });
+  createWindow();
+});
 
 app.on("window-all-closed", () => {
   logInfo("app", "All windows closed, quitting");
@@ -128,6 +140,80 @@ ipcMain.handle(
   }
 );
 
+// -- IPC: Write stage config JSON and return its path -------------------------
+
+ipcMain.handle(
+  "pipeline:write-config",
+  (_event, projectId: string, stageId: string, overrides: Record<string, unknown> = {}) => {
+    const project = projectStore.get(projectId);
+    if (!project) return { error: "Project not found" };
+
+    const projDir = projectStore.ensureProjectDir(PROJECT_ROOT, projectId);
+    const pcPath = project.inputs.pointCloud || "";
+    const pcName = pcPath ? path.basename(pcPath, path.extname(pcPath)) : "";
+    const panoPaths = project.inputs.panoramas || [];
+    // Derive pano_names (bare stems) from full paths: /data/pano/raw/TMB_office1.jpg -> "TMB_office1"
+    const panoNames = panoPaths.map((p: string) => path.basename(p, path.extname(p)));
+
+    // Derive inter-stage paths from point cloud name
+    const densityImageDir = pcName
+      ? path.join(PROJECT_ROOT, "data", "density_image", pcName)
+      : "";
+    const sam3SegDir = path.join(PROJECT_ROOT, "data", "sam3_room_segmentation");
+    const poseEstimatesDir = pcName
+      ? path.join(PROJECT_ROOT, "data", "pose_estimates", "multiroom")
+      : "";
+    const texturedPlyDir = pcName
+      ? path.join(PROJECT_ROOT, "data", "textured_point_cloud", pcName)
+      : "";
+
+    // Stage-specific input_path mapping
+    const stageInputPath: Record<string, string> = {
+      density_image: pcPath,                    // point cloud -> density image
+      sam3_segmentation: densityImageDir,        // density image dir -> SAM3 masks
+      sam3_polygons: densityImageDir,             // density image dir -> polygons
+      pano_footprints: "",                        // uses pano_name override per invocation
+      polygon_matching: densityImageDir,          // density image + pano footprints
+      line_detection_3d: pcPath,                  // point cloud -> 3D lines
+      line_detection_2d: "",                      // uses pano_name override per invocation
+      pose_estimation: "",                        // uses precomputed data
+      colorization: pcPath,                       // point cloud + panos
+      meshing: texturedPlyDir,                    // textured point cloud -> GLB
+    };
+
+    const config: Record<string, unknown> = {
+      point_cloud_path: pcPath,
+      point_cloud_name: pcName,
+      map_name: pcName,
+      panorama_paths: panoPaths,
+      pano_names: panoNames,
+      project_dir: projDir,
+      quality_tier: project.qualityTier || "balanced",
+      // Inter-stage derived paths
+      density_image_dir: densityImageDir,
+      input_path: stageInputPath[stageId] || "",
+      sam3_segmentation_dir: sam3SegDir,
+      pose_estimates_dir: poseEstimatesDir,
+      ...overrides,
+    };
+
+    // Per-pano overrides: add script-expected aliases
+    if (config.pano_name) {
+      config.room_name = config.room_name || config.pano_name;
+      // Set pano_path from input_path if the script expects it
+      if (config.input_path) {
+        config.pano_path = config.pano_path || config.input_path;
+      }
+    }
+
+    const configPath = path.join(projDir, `${stageId}_config.json`);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    logInfo("ipc", `pipeline:write-config ${stageId} -> ${configPath}`);
+    return { ok: true, configPath };
+  }
+);
+
 // -- IPC: Run a single stage subprocess ---------------------------------------
 
 ipcMain.handle(
@@ -200,6 +286,166 @@ ipcMain.handle("find-minimap-png", (_event, glbFilePath: string) => {
 
 // -- IPC: PLY downsample for preview ------------------------------------------
 
+// -- IPC: Artifact resolution -------------------------------------------------
+
+ipcMain.handle(
+  "artifacts:resolve",
+  (_event, projectId: string, stageId: string) => {
+    const project = projectStore.get(projectId);
+    if (!project) return { stageId, artifacts: {} };
+
+    const pcPath = project.inputs.pointCloud || "";
+    const pcName = pcPath ? path.basename(pcPath, path.extname(pcPath)) : "";
+    const panoPaths = project.inputs.panoramas || [];
+    const panoNames = panoPaths.map((p: string) =>
+      path.basename(p, path.extname(p))
+    );
+
+    const artifacts: Record<string, unknown> = {};
+
+    const existsOrNull = (p: string): string | null =>
+      fs.existsSync(p) ? p : null;
+
+    const filterExisting = (paths: string[]): string[] =>
+      paths.filter((p) => fs.existsSync(p));
+
+    switch (stageId) {
+      case "density_image": {
+        const imgPath = path.join(
+          PROJECT_ROOT, "data", "density_image", pcName, `${pcName}.png`
+        );
+        const existing = existsOrNull(imgPath);
+        if (existing) artifacts.images = [existing];
+        break;
+      }
+      case "sam3_segmentation": {
+        // Show the overlay image: <pcName>_overlay.png
+        const overlayImg = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, `${pcName}_overlay.png`
+        );
+        const existing = existsOrNull(overlayImg);
+        if (existing) artifacts.images = [existing];
+        break;
+      }
+      case "sam3_polygons": {
+        // Show density image with polygon outlines overlaid
+        const densityImg = path.join(
+          PROJECT_ROOT, "data", "density_image", pcName, `${pcName}.png`
+        );
+        const polygonsJson = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, `${pcName}_polygons.json`
+        );
+        if (fs.existsSync(densityImg)) artifacts.densityImage = densityImg;
+        if (fs.existsSync(polygonsJson)) artifacts.polygonsJson = polygonsJson;
+        break;
+      }
+      case "pano_footprints": {
+        const imgs = filterExisting(
+          panoNames.map((pn: string) =>
+            path.join(PROJECT_ROOT, "data", "sam3_pano_processing", pn, "debug.png")
+          )
+        );
+        if (imgs.length > 0) artifacts.images = imgs;
+        break;
+      }
+      case "polygon_matching": {
+        const alignPng = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, "demo6_alignment.png"
+        );
+        const alignJson = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, "demo6_alignment.json"
+        );
+        const existingPng = existsOrNull(alignPng);
+        if (existingPng) artifacts.images = [existingPng];
+        const existingJson = existsOrNull(alignJson);
+        if (existingJson) artifacts.alignmentJson = existingJson;
+        break;
+      }
+      case "confirm_matching": {
+        const densityImg = path.join(
+          PROJECT_ROOT, "data", "density_image", pcName, `${pcName}.png`
+        );
+        const alignJson = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, "demo6_alignment.json"
+        );
+        if (fs.existsSync(densityImg)) artifacts.densityImage = densityImg;
+        if (fs.existsSync(alignJson)) artifacts.alignmentJson = alignJson;
+        const panoThumbnails: Record<string, string> = {};
+        for (const pn of panoNames) {
+          const thumbPath = path.join(PROJECT_ROOT, "data", "pano", "raw", `${pn}.jpg`);
+          if (fs.existsSync(thumbPath)) panoThumbnails[pn] = thumbPath;
+        }
+        if (Object.keys(panoThumbnails).length > 0) {
+          artifacts.panoThumbnails = panoThumbnails;
+        }
+        break;
+      }
+      case "line_detection_3d": {
+        const objFile = path.join(
+          PROJECT_ROOT, "data", "debug_renderer", pcName, `${pcName}_lines.obj`
+        );
+        if (fs.existsSync(objFile)) artifacts.objPath = objFile;
+        break;
+      }
+      case "line_detection_2d": {
+        const imgs = filterExisting(
+          panoNames.map((pn: string) =>
+            path.join(
+              PROJECT_ROOT, "data", "pano", "2d_feature_extracted",
+              `${pn}_v2`, "grouped_lines.png"
+            )
+          )
+        );
+        if (imgs.length > 0) artifacts.images = imgs;
+        break;
+      }
+      case "pose_estimation": {
+        const imgs = filterExisting(
+          panoNames.map((pn: string) =>
+            path.join(
+              PROJECT_ROOT, "data", "pose_estimates", "multiroom", pn, "vis", "topdown.png"
+            )
+          )
+        );
+        if (imgs.length > 0) artifacts.images = imgs;
+        break;
+      }
+      case "colorization":
+      case "confirm_colorization": {
+        const texturedPly = path.join(
+          PROJECT_ROOT, "data", "textured_point_cloud", pcName, `${pcName}_textured.ply`
+        );
+        if (fs.existsSync(texturedPly)) artifacts.plyPath = texturedPly;
+        break;
+      }
+      default:
+        break;
+    }
+
+    logInfo("ipc", `artifacts:resolve stageId=${stageId} keys=${Object.keys(artifacts).join(",")}`);
+    return { stageId, artifacts };
+  }
+);
+
+// -- IPC: Read image as base64 data URI ---------------------------------------
+
+ipcMain.handle("artifacts:read-image", (_event, filePath: string) => {
+  try {
+    const data = fs.readFileSync(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const mime =
+      ext === ".png"
+        ? "image/png"
+        : ext === ".jpg" || ext === ".jpeg"
+          ? "image/jpeg"
+          : "application/octet-stream";
+    return `data:${mime};base64,${data.toString("base64")}`;
+  } catch (err) {
+    logError("ipc", `artifacts:read-image failed for ${filePath}: ${(err as Error).message}`);
+    return null;
+  }
+});
+
 ipcMain.handle("log:path", () => getLogPath());
 
 ipcMain.handle(
@@ -217,7 +463,7 @@ ipcMain.handle(
         const proc = spawn(
           "conda",
           [
-            "run", "--no-banner", "-n", "scan_env",
+            "run", "-n", "scan_env",
             "python", path.resolve(PROJECT_ROOT, "src/utils/downsample_for_preview.py"),
             "--config", configPath,
           ],

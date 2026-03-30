@@ -5,11 +5,10 @@ import type { StageConfig } from "../../shared/constants";
 interface UsePipelineOptions {
   stages: StageConfig[];
   projectId: string;
-  projectDir?: string;
   startStage?: number;
 }
 
-export function usePipeline({ stages, projectId: _projectId, projectDir = "", startStage = 0 }: UsePipelineOptions) {
+export function usePipeline({ stages, projectId, startStage = 0 }: UsePipelineOptions) {
   const [state, setState] = useState<PipelineState>(() => ({
     stages: stages.map((_, i) =>
       i < startStage ? "complete" : "pending"
@@ -24,6 +23,7 @@ export function usePipeline({ stages, projectId: _projectId, projectDir = "", st
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(Date.now());
+  const isRunningRef = useRef(false);
 
   // Start elapsed timer when a stage is active
   useEffect(() => {
@@ -42,7 +42,7 @@ export function usePipeline({ stages, projectId: _projectId, projectDir = "", st
     };
   }, [state.currentStage, state.stages]);
 
-  // Listen for IPC events from main process
+  // Listen for IPC events from main process (progress + log only)
   useEffect(() => {
     const api = window.electronAPI;
 
@@ -57,98 +57,118 @@ export function usePipeline({ stages, projectId: _projectId, projectDir = "", st
       }));
     });
 
-    api.onStageComplete((stageIndex: number) => {
+    return () => {
+      api.removeAllListeners("pipeline:progress");
+      api.removeAllListeners("pipeline:log");
+    };
+  }, []);
+
+  const runCurrentStage = useCallback(async () => {
+    // Mutex: prevent concurrent invocations
+    if (isRunningRef.current) return;
+    isRunningRef.current = true;
+
+    try {
+      const stageIndex = state.currentStage;
+      const stage = stages[stageIndex];
+      if (!stage || stage.scriptPaths.length === 0) return;
+
       setState((prev) => {
         const updated = [...prev.stages];
-        updated[stageIndex] = "complete";
-        const next = stageIndex + 1;
-        if (next < stages.length) {
-          updated[next] = stages[next].viewType === "confirmation" ? "confirmation" : "pending";
+        updated[prev.currentStage] = "active";
+        return { ...prev, stages: updated, progress: null, logLines: [], stderrTail: "" };
+      });
+
+      // For perPano stages, run each script once per panorama
+      if (stage.perPano) {
+        // Get pano list from project record
+        const projectData = await window.electronAPI.getProjects() as Array<{
+          id: string;
+          inputs: { panoramas?: string[] };
+        }>;
+        const project = projectData.find((p) => p.id === projectId);
+        const panoPaths = project?.inputs?.panoramas || [];
+
+        for (let pi = 0; pi < panoPaths.length; pi++) {
+          const panoPath = panoPaths[pi];
+          const panoName = panoPath.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "");
+
+          // Write per-pano config
+          const panoConfigResult = await window.electronAPI.writeConfig(
+            projectId,
+            `${stage.id}_${panoName}`,
+            { quality_tier: state.qualityTier, pano_name: panoName, input_path: panoPath }
+          ) as { ok?: boolean; configPath?: string; error?: string };
+
+          if (panoConfigResult.error || !panoConfigResult.configPath) {
+            setState((prev) => {
+              const updated = [...prev.stages];
+              updated[prev.currentStage] = "error";
+              return { ...prev, stages: updated, stderrTail: panoConfigResult.error || "Failed to write pano config" };
+            });
+            return;
+          }
+
+          for (const scriptPath of stage.scriptPaths) {
+            const result = await window.electronAPI.runStage(scriptPath, stage.condaEnv, panoConfigResult.configPath);
+            const typed = result as { ok?: boolean; error?: boolean; stderr?: string };
+            if (typed.error) {
+              setState((prev) => {
+                const updated = [...prev.stages];
+                updated[prev.currentStage] = "error";
+                return { ...prev, stages: updated, stderrTail: typed.stderr || "" };
+              });
+              return;
+            }
+          }
         }
+      } else {
+        // Non-perPano: single invocation
+        const configResult = await window.electronAPI.writeConfig(
+          projectId, stage.id, { quality_tier: state.qualityTier }
+        ) as { ok?: boolean; configPath?: string; error?: string };
+
+        if (configResult.error || !configResult.configPath) {
+          setState((prev) => {
+            const updated = [...prev.stages];
+            updated[prev.currentStage] = "error";
+            return { ...prev, stages: updated, stderrTail: configResult.error || "Failed to write config" };
+          });
+          return;
+        }
+
+        for (const scriptPath of stage.scriptPaths) {
+          const result = await window.electronAPI.runStage(scriptPath, stage.condaEnv, configResult.configPath);
+          const typed = result as { ok?: boolean; error?: boolean; stderr?: string };
+          if (typed.error) {
+            setState((prev) => {
+              const updated = [...prev.stages];
+              updated[prev.currentStage] = "error";
+              return { ...prev, stages: updated, stderrTail: typed.stderr || "" };
+            });
+            return;
+          }
+        }
+      }
+
+      // All scripts succeeded — advance to next stage
+      setState((prev) => {
+        const updated = [...prev.stages];
+        updated[prev.currentStage] = "complete";
+        const next = prev.currentStage + 1;
         return {
           ...prev,
           stages: updated,
-          currentStage: next < stages.length ? next : stageIndex,
+          currentStage: next < stages.length ? next : prev.currentStage,
           progress: null,
           logLines: [],
           elapsedMs: 0,
         };
       });
-    });
-
-    api.onStageError((data: { stageIndex: number; stderr: string }) => {
-      setState((prev) => {
-        const updated = [...prev.stages];
-        updated[data.stageIndex] = "error";
-        return {
-          ...prev,
-          stages: updated,
-          stderrTail: data.stderr,
-        };
-      });
-    });
-
-    return () => {
-      api.removeAllListeners("pipeline:progress");
-      api.removeAllListeners("pipeline:log");
-      api.removeAllListeners("pipeline:stage-complete");
-      api.removeAllListeners("pipeline:stage-error");
-    };
-  }, [stages]);
-
-  const runCurrentStage = useCallback(async () => {
-    const stage = stages[state.currentStage];
-    if (!stage || stage.scriptPaths.length === 0) return;
-
-    setState((prev) => {
-      const updated = [...prev.stages];
-      updated[state.currentStage] = "active";
-      return { ...prev, stages: updated, progress: null, logLines: [], stderrTail: "" };
-    });
-
-    // Run each script in the stage sequentially
-    // Write a per-stage config JSON so Python scripts receive dynamic parameters
-    const configJson: Record<string, unknown> = {
-      project_dir: projectDir,
-      quality_tier: state.qualityTier,
-    };
-    const configJsonPath = projectDir
-      ? `${projectDir}/${stage.id}_config.json`
-      : "";
-    if (configJsonPath) {
-      await window.electronAPI.runStage(
-        "__write_config__", "scan_env",
-        JSON.stringify({ path: configJsonPath, data: configJson })
-      ).catch(() => { /* config write is best-effort */ });
+    } finally {
+      isRunningRef.current = false;
     }
-    for (const scriptPath of stage.scriptPaths) {
-      const result = await window.electronAPI.runStage(scriptPath, stage.condaEnv, configJsonPath);
-      const typed = result as { ok?: boolean; error?: boolean; stderr?: string };
-      if (typed.error) {
-        setState((prev) => {
-          const updated = [...prev.stages];
-          updated[state.currentStage] = "error";
-          return { ...prev, stages: updated, stderrTail: typed.stderr || "" };
-        });
-        return;
-      }
-    }
-
-    // All scripts in stage succeeded
-    setState((prev) => {
-      const updated = [...prev.stages];
-      updated[state.currentStage] = "complete";
-      const next = state.currentStage + 1;
-      return {
-        ...prev,
-        stages: updated,
-        currentStage: next < stages.length ? next : state.currentStage,
-        progress: null,
-        logLines: [],
-        elapsedMs: 0,
-      };
-    });
-  }, [state.currentStage, stages]);
+  }, [state.currentStage, stages, projectId, state.qualityTier]);
 
   const retry = useCallback(() => {
     setState((prev) => {

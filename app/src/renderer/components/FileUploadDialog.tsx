@@ -9,6 +9,7 @@ declare global {
       startPipeline: (projectId: string, stageIndex: number) => Promise<unknown>;
       cancelPipeline: () => Promise<unknown>;
       retryStage: (projectId: string, stageIndex: number) => Promise<unknown>;
+      writeConfig: (projectId: string, stageId: string, overrides?: Record<string, unknown>) => Promise<unknown>;
       runStage: (scriptPath: string, condaEnv: string, configJsonPath: string) => Promise<unknown>;
       downsamplePly: (inputPath: string, outputPath: string) => Promise<unknown>;
       onProgress: (callback: (data: { current: number; total: number; message: string }) => void) => void;
@@ -21,6 +22,8 @@ declare global {
       deleteProject: (id: string) => Promise<unknown>;
       launchUnity: (glbPath: string, minimapPath?: string, metadataPath?: string) => Promise<unknown>;
       findMinimapPng: (glbPath: string) => Promise<unknown>;
+      resolveArtifacts: (projectId: string, stageId: string) => Promise<unknown>;
+      readImage: (filePath: string) => Promise<string>;
       removeAllListeners: (channel: string) => void;
     };
   }

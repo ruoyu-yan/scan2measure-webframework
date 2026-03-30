@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   retryStage: (projectId: string, stageIndex: number) =>
     ipcRenderer.invoke("pipeline:retry", projectId, stageIndex),
 
+  // Write stage config JSON (returns { ok, configPath } or { error })
+  writeConfig: (projectId: string, stageId: string, overrides?: Record<string, unknown>) =>
+    ipcRenderer.invoke("pipeline:write-config", projectId, stageId, overrides || {}),
+
   // Run a single stage subprocess
   runStage: (scriptPath: string, condaEnv: string, configJsonPath: string) =>
     ipcRenderer.invoke("pipeline:run-stage", scriptPath, condaEnv, configJsonPath),
@@ -45,6 +49,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Minimap finder
   findMinimapPng: (glbPath: string) =>
     ipcRenderer.invoke("find-minimap-png", glbPath),
+
+  // Artifact resolution
+  resolveArtifacts: (projectId: string, stageId: string) =>
+    ipcRenderer.invoke("artifacts:resolve", projectId, stageId),
+
+  // Read image as base64 data URI
+  readImage: (filePath: string) =>
+    ipcRenderer.invoke("artifacts:read-image", filePath),
 
   // Remove listeners (restricted to pipeline channels only)
   removeAllListeners: (channel: string) => {
