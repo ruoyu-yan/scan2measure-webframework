@@ -453,6 +453,70 @@ data/
 └── mesh/<map>/                           # Meshing output: .glb (textured), _vertex_colored.ply (full-res), _metadata.json
 ```
 
+## Unity Virtual Tour
+
+**Unity project location**: `E:\OneDrive\File\Uni\KIT\WS25-26\Master Thesis\unity\VirtualTour\` (Windows/E: drive — Unity Hub cannot create projects on `\\wsl.localhost` paths). Scripts mirrored to `unity/Assets/Scripts/` in this repo.
+
+**Build output**: `E:\OneDrive\File\Uni\KIT\WS25-26\Master Thesis\unity\VirtualTour\Build\VirtualTour.exe`
+
+**Launch command**:
+```
+VirtualTour.exe --glb <path.glb> --camera-pose <camera_pose.json> [--minimap <img>] [--metadata <json>]
+```
+
+### Coordinate Conversion Chain
+
+Point Cloud (Z-up) → GLB (no transforms, trimesh exports as-is) → glTFast (negates X for right-to-left hand conversion) → `Euler(-90,0,0)` rotation → Unity world coordinates.
+
+**Mapping**: `Unity = (-pc_x, pc_z, -pc_y)` where `pc` = point cloud frame.
+
+For camera spawn from `camera_pose.json`: `spawnX = -t[0]`, `spawnZ = -t[1]`, `spawnY = floorY + 1.6`.
+
+### Triangle Winding Fix
+
+glTFast's X-negation flips triangle winding order, which inverts normals. This causes: backface culling holes, CharacterController falling through mesh, wall-to-wall measurement reading 0.000m. **Fix**: reverse triangle indices `[a,b,c] → [a,c,b]` + `RecalculateNormals()` in `GLBLoader.cs` after import, before generating MeshColliders.
+
+### Build Requirements
+
+**Shader Preloader**: Shaders loaded at runtime via `Shader.Find()` get stripped from builds. `ShaderPreloader.cs` (attached to a scene GameObject) holds serialized references to force inclusion:
+- `Shader Graphs/glTF-pbrMetallicRoughness` — from Packages > glTFast > Runtime > Shader
+- `Shader Graphs/glTF-unlit` — same location
+- `Custom/OverlayUnlit` — from Assets/Shaders (measurement line/marker overlay)
+- `TextMeshPro/Distance Field Overlay` — from Assets/TextMesh Pro/Shaders (measurement text overlay)
+
+**Build cache lock**: If build fails with "Failed to delete AsyncPluginsFromLinker" or "BurstOutput" (access denied), delete `Library/Bee/artifacts/WinPlayerBuildProgram/` and/or `Temp/BurstOutput/` and retry. Often caused by OneDrive sync or a previous VirtualTour.exe still running.
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `AppBootstrap.cs` | CLI arg parsing (`--glb`, `--minimap`, `--metadata`, `--camera-pose`) |
+| `GLBLoader.cs` | `File.ReadAllBytes` + `LoadGltfBinary` (UNC-safe), triangle winding fix, MeshCollider generation + yield, camera spawn |
+| `FirstPersonController.cs` | WASD walk + F to toggle fly/noclip mode (Q/E up/down). No SnapToGroundHeight (caused oscillation with CharacterController) |
+| `ControlsHelpPanel.cs` | HUD showing current mode (Walk/Fly) and key bindings |
+| `MeasurementManager.cs` | Tool state machine, raycast input, `IMeasurementTool` interface |
+| `PointToPointTool.cs` | Two-click Euclidean distance measurement |
+| `WallToWallTool.cs` | Single-click perpendicular wall distance (raycasts along +wallNormal) |
+| `HeightTool.cs` | Single-click floor-to-ceiling height |
+| `MeasurementRenderer.cs` | Yellow line + red markers + distance label, all overlay-rendered |
+| `ShaderPreloader.cs` | Holds shader references to prevent build stripping |
+| `OverlayUnlit.shader` | Custom shader with `ZTest Always` for measurement visuals |
+| `ToolbarUI.cs` | Top toolbar (1/2/3 shortcuts) + bottom status bar |
+| `MinimapController.cs` | Density image overlay with player dot |
+
+## Electron App Development
+
+**Dev launch** (from WSL, renders via WSLg):
+```bash
+node app/scripts/dev.js
+```
+
+`app/scripts/dev.js` replaces the `concurrently`-based `npm run electron:dev` script because `cmd.exe` (used by npm/concurrently on Windows) cannot handle UNC paths (`\\wsl.localhost\...`) as CWD. The script starts Vite and Electron directly via Node.js `spawn()` with explicit `cwd`, bypassing the shell entirely.
+
+**Unity launcher** (`app/src/main/unity-launcher.ts`): Detects WSL via `/proc/sys/fs/binfmt_misc/WSLInterop`, converts file paths from Linux to Windows format using `wslpath -w` before passing to Unity.exe. Auto-discovers `camera_pose.json` from `data/pose_estimates/multiroom/` (prefers rooms over corridors).
+
+**Pipeline engine** (`app/src/main/pipeline-engine.ts`): Spawns Python scripts via `conda run -n <env>`. Currently assumes `conda` is available in PATH (works in WSL where conda is installed).
+
 ### External Subdirectories
 
 - `RoomFormer/` — floorplan polygon detection model

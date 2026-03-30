@@ -259,54 +259,52 @@ Compares colorized PLY against original scanner RGB (Leica BLK360 G1 — same ca
 
 ---
 
-## Phase 4: Meshing ✅
+## Phase 4: Meshing 🔴
 
-**Status**: ✅ Implemented and validated. Balanced pipeline runs in ~13 min, produces 15 MB GLB.
+**Status**: 🔴 Current Poisson-based approach produces geometrically correct meshes but visually unsatisfactory textured GLBs. The vertex-colored PLY looks correct, but the textured GLB has persistent color artifacts. A new meshing technique needs to be developed.
 
 Convert the colored point cloud into a UV-textured triangle mesh for real-time rendering and measurement.
 
-### 4.1 Surface Reconstruction ✅
+### 4.1 Surface Reconstruction (Poisson — current, problematic) 🔴
 
 **Approach**: Tiled Screened Poisson reconstruction (Open3D). Selected over Ball Pivoting (unreliable with 7-85 mm density variation) and Gaussian Splatting (not geometrically accurate).
 
 **Pipeline** (`mesh_reconstruction.py` — 17-stage orchestrator):
-1. Load colored PLY → 5 mm voxel downsample (8.8M → 5.7M points)
+1. Load colored PLY → 5 mm voxel downsample (5.4M → 4.2M points)
 2. Spatial chunking: 6×6 m XY tiles, 1 m overlap → 8 tiles
-3. Per-tile: normals → Poisson depth 9 → density trim → ownership trim → save to disk
-4. Merge tiles → 3.2M triangles (full-res PLY saved for CloudCompare)
+3. Per-tile: normals → Poisson depth 9 → density trim → ownership trim → vertex color transfer → save to disk
+4. Merge tiles → 3.6M triangles (full-res PLY saved for CloudCompare)
 5. Decimate to 500K triangles for textured GLB
-6. xatlas UV unwrap → bake 4096×4096 texture atlas (KNN=4 IDW from full 8.8M cloud) → dilate → export GLB
+6. xatlas UV unwrap → bake 4096×4096 texture atlas (vertex color interpolation) → dilate → export GLB
 
-**Key design decisions**:
-- Poisson depth 9 (~17 mm voxel): flat surface accuracy ~3-5 mm, corner rounding ~15-20 mm. Meets 1 cm wall-to-wall tolerance.
-- Full-res PLY (3.2M tris) preserved for measurement accuracy. Decimated 500K-tri mesh used only for textured GLB (visual quality).
-- Two-load pattern: original cloud freed after downsample, reloaded for texture baking. Peak RAM ~4-6 GB.
-- Disk-based tile caching prevents OOM on 32 GB machine with ~15 GB free.
+**Known issues**:
+- **Vertex-colored PLY looks correct**, but the **textured GLB has color artifacts** that make the scene look unrealistic. The texture baking step (converting per-vertex colors into a UV atlas) loses fidelity. Two bugs were fixed (double UV normalization, KNN cross-surface bleeding) but the visual quality remains unsatisfactory.
+- The 7.3× decimation (3.6M → 500K triangles) before UV unwrapping may be too aggressive, degrading vertex color quality that feeds into the atlas bake.
+- Poisson reconstruction inherently smooths geometry and can create phantom surfaces in unscanned regions even after density trimming.
+
+**What works**: The geometry (shape, dimensions, metric accuracy) is correct. The vertex-colored PLY is visually faithful to the source point cloud. The issue is specifically in producing a good-looking textured GLB.
 
 **Scripts**: `src/meshing/mesh_reconstruction.py` (orchestrator), `src/meshing/mesh_utils.py` (library), `src/meshing/export_gltf.py` (GLB export)
 
-**Test case results** (tmb_office_one_corridor_dense, 8.8M points):
-- Runtime: ~13 min (Poisson ~11 min, UV/bake ~2 min)
-- GLB: 15.2 MB, 500K triangles, 4096×4096 texture atlas
-- Full-res PLY: 120 MB, 3.2M triangles
-- Extent: 10.57 × 21.53 × 3.84 m (matches input)
-- Peak RAM: ~6 GB, no OOM
+### 4.2 New Meshing Technique Needed ⬜
 
-### 4.2 Future Improvements 🟡
+The current Poisson + UV atlas approach is fundamentally limited for producing visually high-quality textured meshes from colored point clouds. A new technique should be explored that better preserves the realistic appearance of the source point cloud in the final GLB.
 
-- **Runtime optimization**: Per-tile Poisson dominates at ~11 min. Could parallelize tiles or reduce point count further.
-- **Texture baking performance**: Current Python per-face loop is slow at scale. Vectorizing with numpy or using GPU-based baking could cut time significantly.
-- **Draco compression**: Optional post-processing via `gltf-transform draco` CLI reduces GLB from ~15 MB to ~3-5 MB. Not yet integrated into pipeline.
+**Possible directions**:
+- Alternative surface reconstruction methods (TSDF, neural implicit surfaces, alpha shapes)
+- Direct panoramic image projection onto mesh (bypass point cloud colors entirely — project panorama textures onto the mesh using known camera poses)
+- Gaussian splatting or point-based rendering (skip triangle meshes for visual quality, keep mesh only for measurement)
+- Higher-fidelity texture baking (GPU-based, higher atlas resolution, normal-aware sampling)
 
 **Design spec**: `docs/superpowers/specs/2026-03-23-balanced-mesh-reconstruction-design.md`
 
 ---
 
-## Phase 5: End-to-End Desktop App ⬜
+## Phase 5: End-to-End Desktop App 🟡
 
-**Status**: ⬜ Designed. Implementation plans ready.
+**Status**: 🟡 Code implemented (2026-03-25). Electron → Unity "Tour Only" integration tested (2026-03-30). Pipeline stage execution pending.
 
-Two-app desktop system: **Electron** (pipeline orchestrator + 3D preview) + **Unity** (virtual tour + measurement). Designed 2026-03-24.
+Two-app desktop system: **Electron** (pipeline orchestrator + 3D preview) + **Unity** (virtual tour + measurement). Designed 2026-03-24, implemented 2026-03-25.
 
 **Design spec**: `docs/superpowers/specs/2026-03-24-desktop-app-design.md`
 
@@ -317,28 +315,90 @@ Two-app desktop system: **Electron** (pipeline orchestrator + 3D preview) + **Un
 2. **Mesh Only** — colored PLY → preview → select quality tier → mesh → virtual tour
 3. **Tour Only** — existing GLB → launch Unity directly
 
-### 5.1 Python Script Modifications ⬜
+### 5.1 Python Script Modifications ✅
 
 Add `--config <json>` CLI support and `[PROGRESS]` stdout protocol to all 11 pipeline scripts. Shared `config_loader.py` utility. Required before Electron integration.
 
 **Plan**: `docs/superpowers/plans/2026-03-24-python-script-modifications.md` (14 tasks)
 
-### 5.2 Electron App ⬜
+**Completed**: `src/utils/config_loader.py` created. All 11 pipeline scripts import `load_config()` and `progress()`. Scripts fall back to hardcoded defaults when `--config` is not provided, maintaining backward compatibility.
+
+### 5.2 Electron App ✅ (GUI tested)
 
 Pipeline hub with React UI: home screen (3 entry cards + recent projects), pipeline view (sidebar + animated canvas), confirmation gate (draggable polygon correction + re-run), Three.js 3D preview (OBJ/PLY/GLB), project management (JSON store, per-project directories).
 
-**Plan**: `docs/superpowers/plans/2026-03-24-electron-app.md` (28 tasks)
+**Plan**: `docs/superpowers/plans/2026-03-24-electron-app.md` (37 tasks)
 
-### 5.3 Unity Virtual Tour ⬜
+**Completed** (2026-03-25): 31 source files under `app/`. TypeScript compiles clean (both renderer and main process configs, zero errors). npm dependencies installed (558 packages).
 
-First-person viewer: GLB runtime loading (GLTFast), WASD + mouse look with CharacterController collision, top toolbar measurement tools (point-to-point, wall-to-wall, height), minimap with density image + player position, mesh info panel.
+**Key files**:
+- `app/src/main/index.ts` — Electron main process, IPC handlers, file dialogs
+- `app/src/main/pipeline-engine.ts` — Conda subprocess spawner, `[PROGRESS]` parser, process group kill
+- `app/src/main/project-store.ts` — JSON-based project CRUD
+- `app/src/main/unity-launcher.ts` — Spawns Unity .exe with CLI args, WSL path translation, auto-discovers camera pose
+- `app/src/renderer/pages/PipelinePage.tsx` — Pipeline orchestration UI
+- `app/src/renderer/components/ConfirmationGate.tsx` — Draggable polygon correction
+- `app/src/renderer/components/ThreeViewer.tsx` — Three.js OBJ/PLY/GLB viewer
+- `app/src/shared/constants.ts` — Stage definitions, conda envs, script paths
+- `app/scripts/dev.js` — Dev server launcher (bypasses cmd.exe UNC path limitations)
+
+**Code-reviewed and fixed**: IPC channel allowlist (security), config JSON generation, React hooks ordering, CSP for file:// fetch, Three.js memory disposal, subprocess process-group kill.
+
+**Dev environment** (2026-03-30): Electron runs from WSL via WSLg. `app/scripts/dev.js` starts Vite + Electron without `concurrently` (cmd.exe cannot handle UNC paths as CWD). Launch: `node app/scripts/dev.js` from repo root.
+
+**Remaining**: Pipeline stage execution test (Electron → conda → Python), stage icons (`app/assets/icons/`), Vite production build.
+
+### 5.3 Unity Virtual Tour ✅ (built and tested)
+
+First-person viewer: GLB runtime loading (GLTFast), WASD + mouse look with CharacterController collision, fly/noclip mode, top toolbar measurement tools (point-to-point, wall-to-wall, height), minimap with density image + player position, mesh info panel.
 
 **Plan**: `docs/superpowers/plans/2026-03-24-unity-virtual-tour.md` (16 tasks)
 
-### 5.4 Execution Order
+**Completed** (2026-03-27): 15 C# scripts + 1 custom shader under `unity/Assets/Scripts/` and `unity/Assets/Shaders/`. Unity project built and tested as standalone Windows .exe.
 
-1. Python Script Modifications (smallest, unblocks Electron integration)
-2. Electron App + Unity App (can be built in parallel after step 1)
+**Key files**:
+- `AppBootstrap.cs` — CLI arg parsing (`--glb`, `--minimap`, `--metadata`, `--camera-pose`)
+- `GLBLoader.cs` — GLTFast runtime import + triangle winding fix + MeshCollider generation + camera spawn from `camera_pose.json`
+- `FirstPersonController.cs` — WASD walk + fly/noclip mode (F toggle, Q/E up/down, camera-relative movement, no collision in fly mode)
+- `ControlsHelpPanel.cs` — HUD panel showing current mode (Walk/Fly) and key bindings
+- `MeasurementManager.cs` — Tool state machine with `IMeasurementTool` interface
+- `PointToPointTool.cs`, `WallToWallTool.cs`, `HeightTool.cs` — Three measurement tools
+- `MeasurementRenderer.cs` — Yellow line + red markers + distance labels, overlay-rendered (always visible through geometry)
+- `ShaderPreloader.cs` — Holds serialized shader references to prevent build stripping
+- `OverlayUnlit.shader` — Custom shader with `ZTest Always` for measurement visuals
+- `ToolbarUI.cs` — Top toolbar with keyboard shortcuts (1/2/3/Delete)
+- `MinimapController.cs` — Density image overlay with player dot
+- `MeshInfoPanel.cs` — Mesh metadata overlay
+
+**Issues fixed** (2026-03-27):
+- **Mesh holes + physics fall-through**: glTFast X-negation flips triangle winding → reversed indices in `GLBLoader.cs` after import
+- **Camera spawn offset**: Coordinate mapping empirically confirmed as `Unity = (-pc_x, pc_z, -pc_y)`, camera pose uses `spawnX = -t[0]`, `spawnZ = -t[1]`
+- **Wall-to-wall 0.000m**: After winding fix, normals point inward → changed raycast to `+wallNormal` direction
+- **Measurement visuals occluded by mesh noise**: Created `Custom/OverlayUnlit` shader with `ZTest Always` + TMP `Distance Field Overlay` shader for text
+- **Pink mesh in builds**: Shaders loaded via `Shader.Find()` get stripped → `ShaderPreloader.cs` with serialized references
+- **Build failure (access denied)**: OneDrive file locking → delete `Library/Bee/artifacts/WinPlayerBuildProgram/` or `Temp/BurstOutput/` and retry
+
+**Issues fixed** (2026-03-30):
+- **GLB loading from UNC paths**: `gltf.Load($"file://{path}")` fails on `\\wsl.localhost\...` paths → changed to `File.ReadAllBytes()` + `gltf.LoadGltfBinary(data)` (works with any path format)
+- **Walk mode mesh shaking**: `SnapToGroundHeight()` set `transform.position` directly, conflicting with `CharacterController.Move()` every frame → removed SnapToGroundHeight, rely on CharacterController's built-in ground handling
+- **Collider cooking race**: Player spawned before MeshCollider was ready → added `await Task.Yield()` after collider generation
+
+### 5.4 Unity Editor Setup + Build ✅
+
+Unity project created in Unity 2022.3 on Windows. GLTFast 6.9.0 + TextMeshPro packages installed. Scene hierarchy built, all scripts attached, Windows .exe build working.
+
+**Unity project path**: `E:\OneDrive\File\Uni\KIT\WS25-26\Master Thesis\unity\VirtualTour\`
+**Build output**: `E:\...\unity\VirtualTour\Build\VirtualTour.exe`
+
+**Launch**: `VirtualTour.exe --glb <path.glb> --camera-pose <camera_pose.json>`
+
+### 5.5 Execution Order
+
+1. ~~Python Script Modifications (smallest, unblocks Electron integration)~~ ✅
+2. ~~Electron App + Unity App (can be built in parallel after step 1)~~ ✅ Code complete
+3. ~~Unity Editor setup + build~~ ✅ Built and tested (2026-03-27)
+4. ~~Integration test (Electron launches Unity with GLB)~~ ✅ Tour Only flow tested (2026-03-30)
+5. **Next**: Pipeline stage execution test (Electron runs Python scripts via conda)
 
 ---
 
@@ -356,9 +416,13 @@ First-person viewer: GLB runtime loading (GLTFast), WASD + mouse look with Chara
 | 2.6 | Consolidate pose codebase | ✅ Done | — |
 | 2.7 | Jigsaw-informed improvements | 🟡 B+D done, A+C not started | `experiment_polygon_prior.py`, `experiment_local_linefilter.py` |
 | 3 | Point cloud coloring | ✅ Implemented, validated | `colorize_point_cloud.py`, `evaluate_colorization.py` + library modules |
-| 4 | Meshing | ✅ Balanced pipeline, 13 min, 15 MB GLB | `mesh_reconstruction.py`, `mesh_utils.py`, `export_gltf.py` |
-| 4.2 | Meshing improvements | 🟡 Runtime optimization, Draco compression | — |
-| 5 | End-to-end desktop app (Electron + Unity) | ⬜ Designed, plans ready | `docs/superpowers/specs/2026-03-24-desktop-app-design.md` |
+| 4 | Meshing | 🔴 Geometry OK, textured GLB visually poor | `mesh_reconstruction.py`, `mesh_utils.py`, `export_gltf.py` |
+| 4.2 | New meshing technique | ⬜ Current approach insufficient, needs rethink | — |
+| 5.1 | Python script modifications (config + progress) | ✅ All 11 scripts wired | `src/utils/config_loader.py` |
+| 5.2 | Electron desktop app | ✅ GUI tested, Tour Only flow working | `app/src/` |
+| 5.3 | Unity virtual tour | ✅ Built and tested (15 scripts + 1 shader) | `unity/Assets/Scripts/`, `unity/Assets/Shaders/` |
+| 5.4 | Unity Editor setup + build | ✅ Windows .exe working (2026-03-27) | `VirtualTour/Build/VirtualTour.exe` |
+| 5.5 | Integration test (Tour Only) | ✅ Electron → Unity with GLB + camera pose (2026-03-30) | `unity-launcher.ts`, `dev.js` |
 
 ---
 
@@ -375,7 +439,7 @@ Phase 5.3 (measurement) depends on Phase 4 (mesh) or can work directly on the po
 
 ---
 
-## Next Steps (as of 2026-03-24)
+## Next Steps (as of 2026-03-25)
 
 1. ~~**Evaluate SAM3 footprint quality** (Phase 1.4)~~ — ✅ Done.
 
@@ -387,12 +451,15 @@ Phase 5.3 (measurement) depends on Phase 4 (mesh) or can work directly on the po
 
 5. ~~**Color the point cloud** (Phase 3)~~ — ✅ Done.
 
-6. ~~**Start meshing** (Phase 4)~~ — ✅ Done. Balanced pipeline: tiled Poisson depth 9, 5 mm downsample, 500K-tri decimated GLB with 4096 texture atlas. 13 min runtime, 15 MB GLB. Full-res 3.2M-tri PLY preserved.
+6. **Develop new meshing approach** (Phase 4.2) — Current Poisson + UV atlas pipeline produces geometrically correct meshes but visually poor textured GLBs. The vertex-colored PLY looks good but the GLB does not. Need to explore alternative techniques (direct panoramic projection, TSDF, higher-fidelity baking, or non-mesh rendering).
 
-7. **Improve meshing runtime** (Phase 4.2) — Per-tile Poisson dominates at ~11 min. Explore parallelization, further point reduction, or vectorized texture baking.
+8. ~~**Build end-to-end desktop app** (Phase 5)~~ — ✅ Code complete (2026-03-25). All three sub-plans implemented:
+   - ~~Python script modifications (14 tasks)~~ ✅ `config_loader.py` + all 11 scripts wired
+   - ~~Electron app (37 tasks)~~ ✅ 31 files, TypeScript compiles clean, code-reviewed and fixed
+   - ~~Unity virtual tour (16 tasks)~~ ✅ 13 C# scripts (1,326 LOC), code-reviewed and fixed
 
-8. **Build end-to-end desktop app** (Phase 5) — Design complete. Three implementation plans ready:
-   - Python script modifications (14 tasks) — add `--config` + `[PROGRESS]` to all pipeline scripts
-   - Electron app (28 tasks) — pipeline hub with React UI, Three.js preview, project management
-   - Unity virtual tour (16 tasks) — first-person navigation, measurement tools, minimap
-   - Execute Python plan first, then Electron + Unity in parallel.
+9. ~~**Unity Editor setup** (Phase 5.4)~~ — ✅ Done (2026-03-27). Unity project created, all scripts attached, Windows .exe built and tested with `--glb` and `--camera-pose` args.
+
+10. ~~**Integration test (Tour Only)**~~ — ✅ Done (2026-03-30). Electron launches via `node app/scripts/dev.js` (WSLg), Tour Only entry selects GLB, Electron auto-discovers camera pose from `data/pose_estimates/multiroom/`, launches Unity .exe with `--glb` and `--camera-pose` (WSL→Windows path translation via `wslpath -w`). Player spawns inside the office room correctly.
+
+11. **Integration test (Pipeline)** — Test Electron → Python pipeline execution. `pipeline-engine.ts` calls `conda run` which needs to work from the WSL Electron process. Verify `[PROGRESS]` parsing and stage completion flow.
