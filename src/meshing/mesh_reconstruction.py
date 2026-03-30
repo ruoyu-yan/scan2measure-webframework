@@ -37,6 +37,8 @@ import open3d as o3d
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SRC_ROOT / "meshing"))
+sys.path.insert(0, str(_SRC_ROOT / "utils"))
+from config_loader import load_config, progress
 from mesh_utils import (
     compute_tile_grid,
     process_tiles_parallel,
@@ -90,7 +92,6 @@ NORMAL_RADIUS = 0.15
 TILE_SIZE = 6.0
 OVERLAP = 1.0
 MIN_TILE_POINTS = 1000
-BAKE_KNN = 4
 
 MAX_TILE_WORKERS = min(6, max(1, os.cpu_count() // 8))
 MAX_BAKE_WORKERS = min(4, max(1, os.cpu_count() // 8))
@@ -103,19 +104,32 @@ OUTPUT_DIR = ROOT / "data" / "mesh" / "tmb_office_one_corridor_bigger_noRGB"
 # -- Main ---------------------------------------------------------------------
 
 def main():
+    cfg = load_config()
+    pc_name = cfg.get("point_cloud_name", POINT_CLOUD_NAME)
+    quality_tier = cfg.get("quality_tier", QUALITY_TIER)
+    preset = _QUALITY_PRESETS[quality_tier]
+    poisson_depth = preset["poisson_depth"]
+    voxel_size = preset["voxel_size"]
+    normal_knn = preset["normal_knn"]
+    atlas_resolution = preset["atlas_resolution"]
+    glb_target_triangles = preset["glb_target_triangles"]
+    input_path = Path(cfg["input_path"]) if cfg.get("input_path") else INPUT_PATH
+    out_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else OUTPUT_DIR
+
     t_start = time.time()
     stage_times = {}
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    tiles_dir = OUTPUT_DIR / "tiles"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tiles_dir = out_dir / "tiles"
     tiles_dir.mkdir(exist_ok=True)
 
-    print(f"Quality tier: {QUALITY_TIER} (depth={POISSON_DEPTH}, "
-          f"voxel={VOXEL_SIZE*1000:.0f}mm, atlas={ATLAS_RESOLUTION})")
+    print(f"Quality tier: {quality_tier} (depth={poisson_depth}, "
+          f"voxel={voxel_size*1000:.0f}mm, atlas={atlas_resolution})")
 
     # -- Stage 1: Load point cloud --------------------------------------------
+    progress(1, 17, "Loading point cloud")
     t_stage = time.time()
-    print(f"[1/17] Loading point cloud: {INPUT_PATH.name}")
-    pcd = o3d.io.read_point_cloud(str(INPUT_PATH))
+    print(f"[1/17] Loading point cloud: {input_path.name}")
+    pcd = o3d.io.read_point_cloud(str(input_path))
     n_input_points = len(pcd.points)
     has_colors = pcd.has_colors()
     print(f"       {n_input_points:,} points, colors={has_colors}")
@@ -131,8 +145,9 @@ def main():
 
     # -- Stage 2: Voxel downsample --------------------------------------------
     t_stage = time.time()
-    print(f"[2/17] Voxel downsample ({VOXEL_SIZE*1000:.0f} mm) ...")
-    pcd_ds = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE)
+    progress(2, 17, "Voxel downsample")
+    print(f"[2/17] Voxel downsample ({voxel_size*1000:.0f} mm) ...")
+    pcd_ds = pcd.voxel_down_sample(voxel_size=voxel_size)
     n_ds_points = len(pcd_ds.points)
     del pcd  # Free original cloud (~400 MB)
     gc.collect()
@@ -142,6 +157,7 @@ def main():
 
     # -- Stage 3: Compute tile grid -------------------------------------------
     t_stage = time.time()
+    progress(3, 17, "Computing tile grid")
     ds_points = np.asarray(pcd_ds.points)
     bbox_min_ds = ds_points.min(axis=0)
     bbox_max_ds = ds_points.max(axis=0)
@@ -154,13 +170,14 @@ def main():
 
     # -- Stages 4-9: Per-tile reconstruction (parallel) -----------------------
     t_stage = time.time()
+    progress(4, 17, "Per-tile Poisson reconstruction (parallel)")
     print(f"[4-9] Running per-tile Poisson reconstruction "
           f"({MAX_TILE_WORKERS} workers) ...")
     tile_ply_paths, n_skipped, tile_results = process_tiles_parallel(
         pcd_ds, tiles, tiles_dir,
-        normal_knn=NORMAL_KNN,
+        normal_knn=normal_knn,
         normal_radius=NORMAL_RADIUS,
-        poisson_depth=POISSON_DEPTH,
+        poisson_depth=poisson_depth,
         density_trim_quantile=DENSITY_TRIM_QUANTILE,
         min_tile_points=MIN_TILE_POINTS,
         max_workers=MAX_TILE_WORKERS,
@@ -174,6 +191,7 @@ def main():
 
     # -- Stage 10: Merge tile meshes ------------------------------------------
     t_stage = time.time()
+    progress(10, 17, "Merging tile meshes")
     print(f"[10/17] Merging {len(tile_ply_paths)} tile meshes ...")
     tile_meshes = []
     for tile_ply in tile_ply_paths:
@@ -199,7 +217,8 @@ def main():
 
     # -- Stage 11: Save full-resolution vertex-colored PLY --------------------
     t_stage = time.time()
-    ply_path = OUTPUT_DIR / f"{POINT_CLOUD_NAME}_vertex_colored.ply"
+    progress(11, 17, "Saving vertex-colored PLY")
+    ply_path = out_dir / f"{pc_name}_vertex_colored.ply"
     print(f"[11/17] Saving full-res vertex-colored PLY: {ply_path.name}")
     export_vertex_color_ply(merged_mesh, ply_path)
     n_full_tris = len(merged_mesh.triangles)
@@ -207,11 +226,12 @@ def main():
 
     # -- Stage 12: Decimate for UV/bake (full-res preserved in PLY) -----------
     t_stage = time.time()
-    if n_full_tris > GLB_TARGET_TRIANGLES:
-        print(f"[12/17] Decimating {n_full_tris:,} -> {GLB_TARGET_TRIANGLES:,} triangles "
+    progress(12, 17, "Decimating for textured GLB")
+    if n_full_tris > glb_target_triangles:
+        print(f"[12/17] Decimating {n_full_tris:,} -> {glb_target_triangles:,} triangles "
               f"for textured GLB ...")
         merged_mesh = merged_mesh.simplify_quadric_decimation(
-            target_number_of_triangles=GLB_TARGET_TRIANGLES
+            target_number_of_triangles=glb_target_triangles
         )
         merged_mesh.compute_vertex_normals()
         n_dec_verts = len(merged_mesh.vertices)
@@ -222,39 +242,39 @@ def main():
         n_dec_tris = n_full_tris
     stage_times['12_decimate'] = time.time() - t_stage
 
-    # -- Stage 13: Reload original cloud for texture baking -------------------
+    # -- Stage 13: Extract vertex colors for texture baking -------------------
     t_stage = time.time()
-    print(f"[13/17] Reloading original point cloud for texture baking ...")
-    pcd_full = o3d.io.read_point_cloud(str(INPUT_PATH))
-    source_points = np.asarray(pcd_full.points)
-    source_colors = np.asarray(pcd_full.colors) if pcd_full.has_colors() else None
-    stage_times['13_reload'] = time.time() - t_stage
-
-    if source_colors is None:
-        print("       WARNING: No colors in point cloud. Skipping texture baking.")
+    progress(13, 17, "Extracting vertex colors")
+    print(f"[13/17] Extracting vertex colors from decimated mesh ...")
+    if not merged_mesh.has_vertex_colors():
+        print("       WARNING: Mesh has no vertex colors. Skipping texture baking.")
         print("       Vertex-colored PLY was already saved. No GLB produced.")
-        del pcd_full
         return
+
+    vertices = np.asarray(merged_mesh.vertices)
+    normals_arr = np.asarray(merged_mesh.vertex_normals)
+    vertex_colors_arr = np.asarray(merged_mesh.vertex_colors)
+    faces = np.asarray(merged_mesh.triangles)
+    stage_times['13_extract_colors'] = time.time() - t_stage
 
     # -- Stage 14: UV unwrap --------------------------------------------------
     t_stage = time.time()
-    print(f"[14/17] UV unwrapping with xatlas (resolution={ATLAS_RESOLUTION}) ...")
-    vertices = np.asarray(merged_mesh.vertices)
-    normals_arr = np.asarray(merged_mesh.vertex_normals)
-    faces = np.asarray(merged_mesh.triangles)
+    progress(14, 17, "UV unwrapping with xatlas")
+    print(f"[14/17] UV unwrapping with xatlas (resolution={atlas_resolution}) ...")
 
     try:
         vmapping, new_faces, uv_coords = uv_unwrap_mesh(
-            vertices, faces, atlas_resolution=ATLAS_RESOLUTION
+            vertices, faces, atlas_resolution=atlas_resolution
         )
     except Exception as e:
         print(f"       ERROR: xatlas failed: {e}")
         print("       Vertex-colored PLY was already saved. No GLB produced.")
-        del merged_mesh, pcd_full
+        del merged_mesh
         return
 
     new_vertices = vertices[vmapping]
     new_normals = normals_arr[vmapping]
+    new_colors = vertex_colors_arr[vmapping]
     print(f"       {len(vmapping):,} vertices, {len(new_faces):,} faces")
     stage_times['14_uv_unwrap'] = time.time() - t_stage
 
@@ -264,29 +284,29 @@ def main():
 
     # -- Stage 15: Bake texture atlas (parallel) ------------------------------
     t_stage = time.time()
-    print(f"[15/17] Baking texture atlas ({ATLAS_RESOLUTION}x{ATLAS_RESOLUTION}, "
-          f"knn={BAKE_KNN}, {MAX_BAKE_WORKERS} workers) ...")
+    progress(15, 17, "Baking texture atlas (parallel)")
+    print(f"[15/17] Baking texture atlas ({atlas_resolution}x{atlas_resolution}, "
+          f"{MAX_BAKE_WORKERS} workers) ...")
     atlas = bake_texture_atlas(
-        new_vertices, new_faces, uv_coords,
-        source_points, source_colors,
-        atlas_resolution=ATLAS_RESOLUTION,
-        knn=BAKE_KNN,
+        new_faces, uv_coords, new_colors,
+        atlas_resolution=atlas_resolution,
         max_workers=MAX_BAKE_WORKERS,
     )
-    del pcd_full, source_points, source_colors
     gc.collect()
     stage_times['15_bake'] = time.time() - t_stage
     print(f"       Done in {stage_times['15_bake']:.1f}s")
 
     # -- Stage 16: Dilate empty texels ----------------------------------------
     t_stage = time.time()
+    progress(16, 17, "Dilating empty texels")
     print(f"[16/17] Dilating empty texels ...")
     atlas = dilate_texture(atlas, iterations=8)
     stage_times['16_dilate'] = time.time() - t_stage
 
     # -- Stage 17: Export GLB -------------------------------------------------
     t_stage = time.time()
-    glb_path = OUTPUT_DIR / f"{POINT_CLOUD_NAME}.glb"
+    progress(17, 17, "Exporting GLB with metadata")
+    glb_path = out_dir / f"{pc_name}.glb"
     print(f"[17/17] Exporting GLB: {glb_path.name}")
     export_textured_glb(
         new_vertices, new_faces, uv_coords, new_normals,
@@ -302,32 +322,32 @@ def main():
     bbox_max_m = new_vertices.max(axis=0).tolist()
 
     metadata = {
-        "source_point_cloud": str(INPUT_PATH),
+        "source_point_cloud": str(input_path),
         "n_input_points": n_input_points,
         "n_downsampled_points": int(n_ds_points),
-        "voxel_size_mm": VOXEL_SIZE * 1000,
+        "voxel_size_mm": voxel_size * 1000,
         "n_tiles": n_tiles,
         "n_tiles_skipped": n_skipped,
         "tile_size_m": TILE_SIZE,
-        "poisson_depth": POISSON_DEPTH,
+        "poisson_depth": poisson_depth,
         "n_full_res_triangles": int(n_full_tris),
-        "glb_target_triangles": GLB_TARGET_TRIANGLES,
+        "glb_target_triangles": glb_target_triangles,
         "n_vertices": int(len(new_vertices)),
         "n_triangles": int(len(new_faces)),
         "bbox_min_m": bbox_min_m,
         "bbox_max_m": bbox_max_m,
-        "atlas_resolution": ATLAS_RESOLUTION,
-        "bake_knn": BAKE_KNN,
+        "atlas_resolution": atlas_resolution,
+        "bake_method": "vertex_color_interpolation",
         "glb_size_mb": round(glb_size_mb, 2),
         "draco_compressed": False,
         "unit": "meter",
-        "quality_tier": QUALITY_TIER,
+        "quality_tier": quality_tier,
         "reconstruction_time_s": round(total_time, 1),
         "max_tile_workers": MAX_TILE_WORKERS,
         "max_bake_workers": MAX_BAKE_WORKERS,
     }
 
-    json_path = OUTPUT_DIR / f"{POINT_CLOUD_NAME}_metadata.json"
+    json_path = out_dir / f"{pc_name}_metadata.json"
     with open(str(json_path), "w") as f:
         json.dump(metadata, f, indent=2)
 
@@ -342,7 +362,7 @@ def main():
     print(f"  GLB file:    {glb_path}")
     print(f"  GLB size:    {glb_size_mb:.1f} MB")
     print(f"  PLY file:    {ply_path}")
-    print(f"  Atlas:       {ATLAS_RESOLUTION}x{ATLAS_RESOLUTION} px")
+    print(f"  Atlas:       {atlas_resolution}x{atlas_resolution} px")
     print(f"  Metadata:    {json_path}")
     print(f"  Unit:        1 unit = 1 meter (no rescaling applied)")
     print(f"\n  Timing breakdown:")

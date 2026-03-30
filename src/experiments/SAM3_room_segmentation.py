@@ -33,6 +33,8 @@ sam3_repo_path = project_root / "sam3"
 
 if str(sam3_repo_path) not in sys.path:
     sys.path.insert(0, str(sam3_repo_path))
+sys.path.insert(0, str(project_root / "src" / "utils"))
+from config_loader import load_config
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -198,24 +200,27 @@ def process_image(processor, img_path, out_dir):
 # ---------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2:
+    cfg = load_config()
+
+    out_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else OUTPUT_DIR
+
+    if cfg.get("input_path"):
+        target = Path(cfg["input_path"])
+    elif len(sys.argv) >= 2:
+        target = Path(sys.argv[1])
+        if not target.is_absolute():
+            target = project_root / target
+    else:
         print("Usage:")
         print("  python src/SAM3_room_segmentation.py <image_or_directory>")
-        print("\nExamples:")
-        print("  python src/SAM3_room_segmentation.py data/density_image/test_sam3/03264.png")
-        print("  python src/SAM3_room_segmentation.py data/density_image/test_sam3/")
-        print("  python src/SAM3_room_segmentation.py data/density_image/Area_3_office2")
+        print("  python src/SAM3_room_segmentation.py --config <config.json>")
         sys.exit(1)
-
-    target = Path(sys.argv[1])
-    if not target.is_absolute():
-        target = project_root / target
 
     processor = load_model()
 
     if target.is_file() and target.suffix.lower() == ".png":
         # Single image
-        process_image(processor, target, OUTPUT_DIR)
+        process_image(processor, target, out_dir)
 
     elif target.is_dir():
         # Directory — find all PNG files (skip Zone.Identifier files)
@@ -235,12 +240,12 @@ def main():
 
         print(f"Found {len(png_files)} image(s)")
         for img_path in png_files:
-            process_image(processor, img_path, OUTPUT_DIR)
+            process_image(processor, img_path, out_dir)
     else:
         print(f"Not found: {target}")
         sys.exit(1)
 
-    print(f"\nDone. Results in: {OUTPUT_DIR}")
+    print(f"\nDone. Results in: {out_dir}")
 
 
 if __name__ == "__main__":

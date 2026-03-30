@@ -31,6 +31,8 @@ from pathlib import Path
 # ---------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT / "src" / "utils"))
+from config_loader import load_config
 
 # ---------------------------------------------------------
 # CONFIGURATION
@@ -176,17 +178,20 @@ def classify_masks(mask_images, density_img):
 # MAIN
 # ---------------------------------------------------------
 def main():
-    if len(sys.argv) < 2:
+    cfg = load_config()
+
+    if cfg.get("map_name"):
+        map_name = cfg["map_name"]
+    elif len(sys.argv) >= 2:
+        map_name = sys.argv[1]
+    else:
         print("Usage: python src/experiments/SAM3_mask_to_polygons.py <map_name>")
-        print("\nExamples:")
-        print("  python src/experiments/SAM3_mask_to_polygons.py tmb_office_one_corridor")
-        print("  python src/experiments/SAM3_mask_to_polygons.py tmb_office_corridor_bigger")
+        print("       python src/experiments/SAM3_mask_to_polygons.py --config <config.json>")
         sys.exit(1)
 
-    map_name = sys.argv[1]
-    mask_dir = _PROJECT_ROOT / "data" / "sam3_room_segmentation" / map_name
-    density_dir = _PROJECT_ROOT / "data" / "density_image" / map_name
-    output_path = mask_dir / f"{map_name}_polygons.json"
+    mask_dir = Path(cfg["mask_dir"]) if cfg.get("mask_dir") else _PROJECT_ROOT / "data" / "sam3_room_segmentation" / map_name
+    density_dir = Path(cfg["density_dir"]) if cfg.get("density_dir") else _PROJECT_ROOT / "data" / "density_image" / map_name
+    output_path = Path(cfg["output_path"]) if cfg.get("output_path") else mask_dir / f"{map_name}_polygons.json"
 
     # Load density image metadata
     metadata_path = density_dir / "metadata.json"

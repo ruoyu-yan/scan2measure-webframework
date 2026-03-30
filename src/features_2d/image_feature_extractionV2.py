@@ -17,6 +17,7 @@ from pathlib import Path
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SRC_ROOT / "utils"))
+from config_loader import load_config, progress
 
 import cv2
 import numpy as np
@@ -37,16 +38,23 @@ OUT_DIR = ROOT / "data" / "pano" / "2d_feature_extracted" / f"{ROOM_NAME}_v2"
 
 
 def main():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = load_config()
+    room_name = cfg.get("room_name", ROOM_NAME)
+    pano_res = tuple(cfg["pano_resolution"]) if cfg.get("pano_resolution") else PANO_RESOLUTION
+    pano_path = Path(cfg["pano_path"]) if cfg.get("pano_path") else ROOT / "data" / "pano" / "raw" / f"{room_name}.jpg"
+    out_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else ROOT / "data" / "pano" / "2d_feature_extracted" / f"{room_name}_v2"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Load panorama
-    img = cv2.imread(str(PANO_PATH))
-    assert img is not None, f"Cannot read {PANO_PATH}"
+    progress(1, 4, f"Loading panorama {room_name}")
+    img = cv2.imread(str(pano_path))
+    assert img is not None, f"Cannot read {pano_path}"
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (PANO_RESOLUTION[1], PANO_RESOLUTION[0]))
+    img = cv2.resize(img, (pano_res[1], pano_res[0]))
     print(f"Loaded panorama: {img.shape}")
 
     # 2. Detect lines + elevation mask (discard near-pole lines)
+    progress(2, 4, "Detecting lines on sphere")
     lines_np = detect_pano_lines(img)
     n_raw = lines_np.shape[0]
     starts = lines_np[:, 3:6]
@@ -63,6 +71,7 @@ def main():
           f"elevation mask ({ELEV_MASK_DEG}° from poles)")
 
     # 3. Extract vanishing points
+    progress(3, 4, "Analyzing vanishing points and intersections")
     principal_2d = extract_vanishing_points(lines)
     det_val = torch.det(principal_2d).item()
     print(f"Principal directions (det={det_val:.6f}):\n{principal_2d}")
@@ -74,11 +83,12 @@ def main():
     print(f"Intersections per group: {inter_counts}, total: {sum(inter_counts)}")
 
     # 5. Render visualizations
-    H, W = PANO_RESOLUTION
+    progress(4, 4, "Saving features")
+    H, W = pano_res
 
     # edge_overlay.png — white lines on black
     edge_img = render_sphere_lines(lines, resolution=(H, W))
-    cv2.imwrite(str(OUT_DIR / "edge_overlay.png"),
+    cv2.imwrite(str(out_dir / "edge_overlay.png"),
                 cv2.cvtColor(edge_img, cv2.COLOR_RGB2BGR))
     print(f"Saved edge_overlay.png")
 
@@ -94,7 +104,7 @@ def main():
         # Composite: overwrite panorama where group has non-black pixels
         line_mask = group_img.sum(axis=-1) > 0
         pano_base[line_mask] = group_img[line_mask]
-    cv2.imwrite(str(OUT_DIR / "grouped_lines.png"),
+    cv2.imwrite(str(out_dir / "grouped_lines.png"),
                 cv2.cvtColor(pano_base, cv2.COLOR_RGB2BGR))
     print(f"Saved grouped_lines.png")
 

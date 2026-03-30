@@ -28,6 +28,7 @@ import torch
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SRC_ROOT / "utils"))
+from config_loader import load_config, progress
 sys.path.insert(0, str(_SRC_ROOT / "visualization"))
 sys.path.insert(0, str(_SRC_ROOT / "features_2d"))
 from sphere_geometry import generate_sphere_points
@@ -100,20 +101,20 @@ def aligned_meters_to_raw_3d(xy_aligned, metadata):
     return pos_3d[:2]
 
 
-def load_panorama_positions():
+def load_panorama_positions(alignment_path, metadata_path, pano_name_list):
     """Load panorama 3D XY positions from demo6_alignment.json.
 
     Returns dict: pano_name -> np.array([x, y]) in raw 3D meters.
     """
-    with open(ALIGNMENT_PATH) as f:
+    with open(alignment_path) as f:
         alignment = json.load(f)
-    with open(METADATA_PATH) as f:
+    with open(metadata_path) as f:
         metadata = json.load(f)
 
     positions = {}
     for match in alignment['matches']:
         name = match['pano_name']
-        if name in PANO_NAMES:
+        if name in pano_name_list:
             cam_aligned = match['camera_position']
             xy = aligned_meters_to_raw_3d(cam_aligned, metadata)
             positions[name] = xy
@@ -123,20 +124,20 @@ def load_panorama_positions():
     return positions
 
 
-def compute_voronoi_assignment(points_xy, pano_positions):
+def compute_voronoi_assignment(points_xy, pano_positions, pano_name_list):
     """Assign each point to nearest panorama. Returns (N,) int array of pano indices."""
-    pano_xys = np.array([pano_positions[name] for name in PANO_NAMES])  # (P, 2)
+    pano_xys = np.array([pano_positions[name] for name in pano_name_list])  # (P, 2)
     dists = np.linalg.norm(points_xy[:, None, :] - pano_xys[None, :, :], axis=2)  # (N, P)
     return np.argmin(dists, axis=1)
 
 
-def get_local_mask(points_xy, pano_idx, pano_positions, voronoi_labels, margin):
+def get_local_mask(points_xy, pano_idx, pano_positions, voronoi_labels, margin, pano_name_list):
     """Get boolean mask for points belonging to this panorama (Voronoi + margin).
 
     Includes: Voronoi-assigned points + any point within margin of this panorama.
     """
     voronoi_mask = voronoi_labels == pano_idx
-    pano_xy = pano_positions[PANO_NAMES[pano_idx]]
+    pano_xy = pano_positions[pano_name_list[pano_idx]]
     dist_to_pano = np.linalg.norm(points_xy - pano_xy[None, :], axis=1)
     margin_mask = dist_to_pano <= margin
     return voronoi_mask | margin_mask
@@ -145,23 +146,41 @@ def get_local_mask(points_xy, pano_idx, pano_positions, voronoi_labels, margin):
 # -- Main --------------------------------------------------------------------
 
 def main():
+    cfg = load_config()
+
+    pc_name = cfg.get("point_cloud_name", POINT_CLOUD_NAME)
+    pano_names = cfg.get("pano_names", PANO_NAMES)
+    # Important: Electron app MUST pass "use_local_filtering": true
+    use_local = cfg.get("use_local_filtering", USE_LOCAL_FILTERING)
+
+    pkl_3d_path = Path(cfg["pkl_3d_path"]) if cfg.get("pkl_3d_path") else ROOT / "data" / "debug_renderer" / pc_name / "3d_line_map.pkl"
+    alignment_path = Path(cfg["alignment_path"]) if cfg.get("alignment_path") else ROOT / "data" / "sam3_room_segmentation" / pc_name / "demo6_alignment.json"
+    metadata_path = Path(cfg["metadata_path"]) if cfg.get("metadata_path") else ROOT / "data" / "density_image" / pc_name / "metadata.json"
+    pc_path = Path(cfg["point_cloud_path"]) if cfg.get("point_cloud_path") else ROOT / "data" / "raw_point_cloud" / f"{pc_name}.ply"
+    density_img_path = Path(cfg["density_image_path"]) if cfg.get("density_image_path") else ROOT / "data" / "density_image" / pc_name / f"{pc_name}.png"
+    features_2d_base = Path(cfg["features_2d_dir"]) if cfg.get("features_2d_dir") else ROOT / "data" / "pano" / "2d_feature_extracted"
+    pano_dir = Path(cfg["pano_dir"]) if cfg.get("pano_dir") else ROOT / "data" / "pano" / "raw"
+    output_base = Path(cfg["output_dir"]) if cfg.get("output_dir") else OUTPUT_BASE
+
     device = torch.device(DEVICE)
     t_start = time.time()
+    total_steps = 1 + len(pano_names)
 
     # ================================================================
     # PHASE A: One-time 3D setup
     # ================================================================
+    progress(1, total_steps, "3D setup and precomputation")
     print("=" * 60)
     print("PHASE A: One-time 3D setup")
     print("=" * 60)
-    if USE_LOCAL_FILTERING:
+    if use_local:
         print("  Mode: LOCAL FILTERING (Voronoi + margin)")
     else:
         print("  Mode: GLOBAL (original)")
 
     # -- A1: Load 3D map ---------------------------------------------------
     print("\n[A1] Loading 3D wireframe from 3d_line_map.pkl...")
-    with open(PKL_3D_PATH, 'rb') as f:
+    with open(pkl_3d_path, 'rb') as f:
         line_map = pickle.load(f)
 
     # Dense lines for XDF matching
@@ -199,20 +218,20 @@ def main():
     print(f"    {query_pts.shape[0]} query points (level {QUERY_SPHERE_LEVEL})")
 
     # -- A3: Local filtering setup OR global precomputation ----------------
-    if USE_LOCAL_FILTERING:
+    if use_local:
         print("\n[A3] Loading panorama positions for Voronoi filtering...")
-        pano_positions = load_panorama_positions()
+        pano_positions = load_panorama_positions(alignment_path, metadata_path, pano_names)
 
         print("\n[A4] Computing Voronoi assignments...")
         dense_mid_xy = ((dense_starts + dense_ends) / 2)[:, :2].numpy()
         sparse_mid_xy = ((starts_sparse + ends_sparse) / 2)[:, :2].numpy()
         inter_xy = inter_3d_all[:, :2].numpy()
 
-        voronoi_dense = compute_voronoi_assignment(dense_mid_xy, pano_positions)
-        voronoi_sparse = compute_voronoi_assignment(sparse_mid_xy, pano_positions)
-        voronoi_inter = compute_voronoi_assignment(inter_xy, pano_positions)
+        voronoi_dense = compute_voronoi_assignment(dense_mid_xy, pano_positions, pano_names)
+        voronoi_sparse = compute_voronoi_assignment(sparse_mid_xy, pano_positions, pano_names)
+        voronoi_inter = compute_voronoi_assignment(inter_xy, pano_positions, pano_names)
 
-        for pi, name in enumerate(PANO_NAMES):
+        for pi, name in enumerate(pano_names):
             nd = (voronoi_dense == pi).sum()
             ns = (voronoi_sparse == pi).sum()
             ni = (voronoi_inter == pi).sum()
@@ -221,20 +240,21 @@ def main():
         # Load visualization data
         print("\n[A5] Loading visualization data (point cloud, density image, polygons)...")
         import open3d as o3d
-        pcd = o3d.io.read_point_cloud(str(PC_PATH))
+        pcd = o3d.io.read_point_cloud(str(pc_path))
         pc_pts = np.asarray(pcd.points)
         rng = np.random.default_rng(42)
         if pc_pts.shape[0] > 50000:
             pc_pts = pc_pts[rng.choice(pc_pts.shape[0], 50000, replace=False)]
         print(f"    Point cloud: {pc_pts.shape[0]} points (subsampled)")
 
-        density_img = cv2.imread(str(DENSITY_IMG_PATH), cv2.IMREAD_GRAYSCALE)
-        with open(METADATA_PATH) as f:
+        density_img = cv2.imread(str(density_img_path), cv2.IMREAD_GRAYSCALE)
+        with open(metadata_path) as f:
             density_meta = json.load(f)
 
         room_polygons = None
-        if ROOMFORMER_PATH.exists():
-            with open(ROOMFORMER_PATH) as f:
+        roomformer_path = ROOT / "data" / "reconstructed_floorplans_RoomFormer" / pc_name / "predictions.json"
+        if roomformer_path.exists():
+            with open(roomformer_path) as f:
                 room_polygons = json.load(f)
         print(f"    Density image: {density_img.shape}")
         print(f"    RoomFormer polygons: {len(room_polygons) if room_polygons else 0}")
@@ -268,30 +288,28 @@ def main():
     # ================================================================
     all_results = {}
 
-    for pano_idx, pano_name in enumerate(PANO_NAMES):
+    for pano_idx, pano_name in enumerate(pano_names):
+        progress(2 + pano_idx, total_steps, f"Pose estimation: {pano_name}")
         print("\n" + "=" * 60)
-        print(f"PHASE B [{pano_idx+1}/{len(PANO_NAMES)}]: {pano_name}")
+        print(f"PHASE B [{pano_idx+1}/{len(pano_names)}]: {pano_name}")
         print("=" * 60)
 
         t_pano = time.time()
 
-        features_2d_path = (
-            ROOT / "data" / "pano" / "2d_feature_extracted"
-            / f"{pano_name}_v2" / "fgpl_features.json"
-        )
-        pano_img_path = ROOT / "data" / "pano" / "raw" / f"{pano_name}.jpg"
-        pano_output_dir = OUTPUT_BASE / pano_name
+        features_2d_path = features_2d_base / f"{pano_name}_v2" / "fgpl_features.json"
+        pano_img_path = pano_dir / f"{pano_name}.jpg"
+        pano_output_dir = output_base / pano_name
         vis_dir = pano_output_dir / "vis"
 
         # -- Per-panorama local filtering ----------------------------------
-        if USE_LOCAL_FILTERING:
+        if use_local:
             print(f"\n[B0] Filtering 3D lines for {pano_name}...")
             dense_mask = get_local_mask(dense_mid_xy, pano_idx, pano_positions,
-                                        voronoi_dense, OVERLAP_MARGIN)
+                                        voronoi_dense, OVERLAP_MARGIN, pano_names)
             sparse_mask = get_local_mask(sparse_mid_xy, pano_idx, pano_positions,
-                                         voronoi_sparse, OVERLAP_MARGIN)
+                                         voronoi_sparse, OVERLAP_MARGIN, pano_names)
             inter_mask = get_local_mask(inter_xy, pano_idx, pano_positions,
-                                        voronoi_inter, OVERLAP_MARGIN)
+                                        voronoi_inter, OVERLAP_MARGIN, pano_names)
 
             local_dense_starts = dense_starts[dense_mask]
             local_dense_ends = dense_ends[dense_mask]
@@ -375,7 +393,7 @@ def main():
                 inter_2d_list_2d, inter_2d_idx_list, perms_expanded)
 
         # -- B6: XDF coarse search -----------------------------------------
-        if USE_LOCAL_FILTERING:
+        if use_local:
             print("\n[B6] XDF coarse search (per-panorama 3D)...")
         else:
             print("\n[B6] XDF coarse search (2D only -- 3D cached)...")
@@ -468,7 +486,7 @@ def main():
             't': final_t.tolist(),
             'R': final_R.tolist(),
         }
-        if USE_LOCAL_FILTERING:
+        if use_local:
             result_entry['n_translations'] = n_trans
             result_entry['n_dense_lines'] = n_dense
             result_entry['n_sparse_lines'] = n_sparse
@@ -527,7 +545,7 @@ def main():
                         cv2.cvtColor(sbs, cv2.COLOR_RGB2BGR))
             print(f"    Saved {vis_dir / 'side_by_side.png'}")
 
-            if USE_LOCAL_FILTERING:
+            if use_local:
                 # reprojection.png -- point cloud depth overlay
                 reproj = render_reprojection(pano_img, pc_pts, final_R, final_t)
                 cv2.imwrite(str(vis_dir / "reprojection.png"),
@@ -549,7 +567,7 @@ def main():
     # ================================================================
     # Output: local_filter_results.json
     # ================================================================
-    out_json = OUTPUT_BASE / "local_filter_results.json"
+    out_json = output_base / "local_filter_results.json"
     with open(out_json, 'w') as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSaved {out_json}")
@@ -559,13 +577,13 @@ def main():
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"  Mode: {'LOCAL FILTERING' if USE_LOCAL_FILTERING else 'GLOBAL'}")
-    if not USE_LOCAL_FILTERING:
+    print(f"  Mode: {'LOCAL FILTERING' if use_local else 'GLOBAL'}")
+    if not use_local:
         print(f"  3D precompute: {dt_3d:.1f}s")
-    for pano_name in PANO_NAMES:
+    for pano_name in pano_names:
         r = all_results[pano_name]
-        pose_path = OUTPUT_BASE / pano_name / "camera_pose.json"
-        vis_path = OUTPUT_BASE / pano_name / "vis" / "side_by_side.png"
+        pose_path = output_base / pano_name / "camera_pose.json"
+        vis_path = output_base / pano_name / "vis" / "side_by_side.png"
         print(f"  {pano_name}:")
         print(f"    n_tight={r['n_tight']}  avg_dist={r['avg_dist']:.4f}  "
               f"t={r['t']}")

@@ -9,11 +9,15 @@ line_clustering_3d.py, and writes:
 """
 
 import pickle
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+from config_loader import load_config, progress
 
 from line_clustering_3d import (
     vote_principal_directions,
@@ -38,11 +42,17 @@ PKL_IN       = DATA_DIR / "room_geometry.pkl"
 
 
 def main():
+    cfg = load_config()
+    pc_name = cfg.get("point_cloud_name", POINT_CLOUD_NAME)
+    pkl_in = Path(cfg["input_pkl"]) if cfg.get("input_pkl") else PROJECT_ROOT / "data" / "debug_renderer" / pc_name / "room_geometry.pkl"
+    data_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else PROJECT_ROOT / "data" / "debug_renderer" / pc_name
+
     start_time = time.time()
 
     # ── 1. Load room_geometry.pkl ─────────────────────────────────────
-    print(f"Loading {PKL_IN} ...")
-    with open(PKL_IN, 'rb') as f:
+    progress(1, 4, "Loading room geometry")
+    print(f"Loading {pkl_in} ...")
+    with open(pkl_in, 'rb') as f:
         bake = pickle.load(f)
     segments = bake['wireframe_segments']
     print(f"  {len(segments)} line segments")
@@ -74,6 +84,7 @@ def main():
     print(f"  Dense lines  (>= {DENSE_LENGTH_THRES} m): {dense_dirs.shape[0]}")
 
     # ── 3. Vote principal directions (on sparse set) ──────────────────
+    progress(2, 4, "Voting principal directions and classifying lines")
     print("\nVoting principal directions ...")
     principal_3d = vote_principal_directions(sparse_dirs)
 
@@ -82,6 +93,7 @@ def main():
     edge_mask_dense  = classify_lines_3d(dense_dirs, principal_3d, INLIER_THRES)
 
     # ── 5. Find intersections (on dense set) ──────────────────────────
+    progress(3, 4, "Finding 3D intersections")
     print("Finding intersections ...")
     inter_pts, inter_idx = find_intersections_3d(
         dense_dirs, dense_starts, dense_ends, principal_3d,
@@ -108,19 +120,20 @@ def main():
         'edge_mask_sparse': edge_mask_sparse,
         'edge_mask_dense':  edge_mask_dense,
     }
-    pkl_out = DATA_DIR / "3d_line_map.pkl"
+    progress(4, 4, "Saving 3d_line_map.pkl")
+    pkl_out = data_dir / "3d_line_map.pkl"
     with open(pkl_out, 'wb') as f:
         pickle.dump(map_dict, f)
     print(f"\nSaved {pkl_out}")
 
     # ── 8. Write clustered_lines.obj ──────────────────────────────────
-    obj_lines = DATA_DIR / "clustered_lines.obj"
+    obj_lines = data_dir / "clustered_lines.obj"
     write_colored_lines_obj(obj_lines, dense_starts, dense_ends,
                             edge_mask_dense, principal_3d)
     print(f"Saved {obj_lines}")
 
     # ── 9. Write intersections.obj ────────────────────────────────────
-    obj_inter = DATA_DIR / "intersections.obj"
+    obj_inter = data_dir / "intersections.obj"
     write_intersections_obj(obj_inter, inter_pts)
     print(f"Saved {obj_inter}")
 

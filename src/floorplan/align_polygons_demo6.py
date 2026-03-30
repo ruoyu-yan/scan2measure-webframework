@@ -45,6 +45,8 @@ _SRC_DIR = _SCRIPT_FILE.parent.parent
 _PROJECT_ROOT = _SRC_DIR.parent
 
 sys.path.insert(0, str(_SRC_DIR / "floorplan"))
+sys.path.insert(0, str(_SRC_DIR / "utils"))
+from config_loader import load_config
 from polygon_scale_calculation_v2 import (
     method_a_edge_distances,
     method_b_procrustes,
@@ -409,31 +411,38 @@ def run_matching(map_polys, map_labels, panos, scale):
 # MAIN
 # ---------------------------------------------------------
 def main():
-    argv = list(sys.argv[1:])
+    cfg = load_config()
 
-    compare_mode = "--compare" in argv
-    if compare_mode:
-        argv.remove("--compare")
-    anchor_mode = "--anchor" in argv
-    if anchor_mode:
-        argv.remove("--anchor")
+    if cfg.get("map_name") and cfg.get("pano_names"):
+        map_name = cfg["map_name"]
+        pano_names = cfg["pano_names"]
+        compare_mode = False
+        anchor_mode = False
+    else:
+        argv = list(sys.argv[1:])
 
-    if len(argv) < 2:
-        print("Usage: python src/floorplan/align_polygons_demo6.py "
-              "[--compare|--anchor] <map_name> [pano1 pano2 ...]")
-        print("\nExamples:")
-        print("  conda run -n scan_env python src/floorplan/align_polygons_demo6.py "
-              "tmb_office_corridor_bigger TMB_corridor_south1 TMB_corridor_south2 TMB_office1")
-        sys.exit(1)
+        compare_mode = "--compare" in argv
+        if compare_mode:
+            argv.remove("--compare")
+        anchor_mode = "--anchor" in argv
+        if anchor_mode:
+            argv.remove("--anchor")
 
-    map_name = argv[0]
-    pano_names = argv[1:]
+        if len(argv) < 2:
+            print("Usage: python src/floorplan/align_polygons_demo6.py "
+                  "[--compare|--anchor] <map_name> [pano1 pano2 ...]")
+            print("       python src/floorplan/align_polygons_demo6.py --config <config.json>")
+            sys.exit(1)
 
-    sam3_map_json = (
+        map_name = argv[0]
+        pano_names = argv[1:]
+
+    sam3_map_json = Path(cfg["sam3_map_json"]) if cfg.get("sam3_map_json") else (
         _PROJECT_ROOT / "data" / "sam3_room_segmentation"
         / map_name / f"{map_name}_polygons.json"
     )
-    output_dir = _PROJECT_ROOT / "data" / "sam3_room_segmentation" / map_name
+    sam3_pano_base = Path(cfg["sam3_pano_base"]) if cfg.get("sam3_pano_base") else SAM3_PANO_BASE
+    output_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else _PROJECT_ROOT / "data" / "sam3_room_segmentation" / map_name
 
     print("=" * 60)
     print("Polygon Alignment Demo 6 — Jigsaw Puzzle Matching")
@@ -468,7 +477,7 @@ def main():
     panos = []
     pano_polys_dict = {}
     for name in pano_names:
-        layout_path = SAM3_PANO_BASE / name / "layout.json"
+        layout_path = sam3_pano_base / name / "layout.json"
         with open(layout_path) as f:
             data = json.load(f)
         poly = np.array(data["layout_corners"])

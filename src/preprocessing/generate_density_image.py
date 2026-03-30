@@ -6,6 +6,9 @@ import cv2
 import json
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+from config_loader import load_config, progress
+
 # -------------------------------------------------------------------------
 # 0. PATH SETUP
 # -------------------------------------------------------------------------
@@ -157,23 +160,32 @@ def generate_density(point_cloud, width=256, height=256):
 # 4. MAIN EXECUTION
 # -------------------------------------------------------------------------
 def main():
-    # --- CONFIGURATION ---
-    FILENAME = "tmb_office_one_corridor_bigger_noRGB.ply"
-    # ---------------------
+    cfg = load_config()
 
-    input_path = input_dir / FILENAME
-    
+    # --- CONFIGURATION (overridable via --config) ---
+    if cfg.get("point_cloud_path"):
+        input_path = Path(cfg["point_cloud_path"])
+    else:
+        FILENAME = "tmb_office_one_corridor_bigger_noRGB.ply"
+        input_path = input_dir / FILENAME
+
+    out_folder = Path(cfg["output_dir"]) if cfg.get("output_dir") else output_dir / input_path.stem
+    pc_name = cfg.get("point_cloud_name", input_path.stem)
+    # ------------------------------------------------
+
     if not input_path.exists():
         print(f"Error: File not found at: {input_path}")
         sys.exit(1)
 
-    print(f"--- Processing {FILENAME} ---")
+    print(f"--- Processing {input_path.name} ---")
 
     # 1. Load
+    progress(1, 4, "Loading point cloud")
     pcd = o3d.io.read_point_cloud(str(input_path))
     if pcd.is_empty(): sys.exit(1)
-    
+
     # 2. Align (Z and XY) — track cumulative rotation
+    progress(2, 4, "Aligning to floor and axes")
     R_global = np.eye(3)
 
     pcd, R_floor = align_to_floor(pcd)
@@ -183,12 +195,13 @@ def main():
     R_global = R_yaw @ R_global
 
     # 3. Units & Quantization
+    progress(3, 4, "Generating density image")
     points = np.asarray(pcd.points)
     extents = np.max(points, axis=0) - np.min(points, axis=0)
     if np.max(extents) < 500: points *= 1000.0
 
     # Initialize unique_coords with raw points (Default)
-    unique_coords = points 
+    unique_coords = points
 
     # --- QUANTIZATION (Comment out to disable) ---
     print("  > Applying quantization...")
@@ -196,7 +209,7 @@ def main():
     points[:,2] = np.round(points[:,2] / 100) * 100.
     unique_coords = np.unique(points, axis=0)
     # ---------------------------------------------
-    
+
     # 4. Generate Density Image
     print("  > Generating proportional density map...")
     density_map, metadata = generate_density(unique_coords)
@@ -204,14 +217,14 @@ def main():
     # Embed the accumulated rotation matrix so downstream tools can
     # replicate the exact coordinate system from the raw point cloud.
     metadata["rotation_matrix"] = R_global.tolist()
-    
+
     density_img_vis = (density_map * 255).astype(np.uint8)
-    
+
     # 5. Save into a per-pointcloud folder
-    out_folder = output_dir / input_path.stem
+    progress(4, 4, "Saving output")
     out_folder.mkdir(parents=True, exist_ok=True)
 
-    image_path = out_folder / (input_path.stem + ".png")
+    image_path = out_folder / (pc_name + ".png")
     metadata_path = out_folder / "metadata.json"
 
     cv2.imwrite(str(image_path), density_img_vis)

@@ -330,129 +330,93 @@ def uv_unwrap_mesh(vertices, faces, atlas_resolution=4096):
     atlas.generate(xatlas.ChartOptions(), pack_options)
     vmapping, new_faces, uv_coords = atlas[0]
     uv_coords = uv_coords.astype(np.float64)
-    w = max(atlas.width, 1)
-    h = max(atlas.height, 1)
-    uv_coords[:, 0] /= w
-    uv_coords[:, 1] /= h
     return vmapping, new_faces, uv_coords
 
 
 # Module-level state for bake workers (set by initializer in spawn context)
-_bake_source_points = None
-_bake_source_colors = None
 _bake_face_uvs = None
-_bake_face_verts = None
+_bake_face_colors = None
 
 
-def _bake_worker_init(source_points, source_colors, face_uvs, face_verts):
+def _bake_worker_init(face_uvs, face_colors):
     """Initializer for bake worker processes — sets module globals."""
-    global _bake_source_points, _bake_source_colors
-    global _bake_face_uvs, _bake_face_verts
-    _bake_source_points = source_points
-    _bake_source_colors = source_colors
+    global _bake_face_uvs, _bake_face_colors
     _bake_face_uvs = face_uvs
-    _bake_face_verts = face_verts
+    _bake_face_colors = face_colors
 
 
-def _bake_face_chunk(face_start, face_end, atlas_resolution, knn):
-    """Worker: bake a chunk of faces into a partial atlas."""
-    source_points = _bake_source_points
-    source_colors = _bake_source_colors
+def _bake_face_chunk(face_start, face_end, atlas_resolution):
+    """Worker: bake a chunk of faces by interpolating vertex colors."""
     face_uvs = _bake_face_uvs
-    face_verts = _bake_face_verts
+    face_colors = _bake_face_colors
 
     res = atlas_resolution
     atlas = np.zeros((res, res, 3), dtype=np.uint8)
-    tree = cKDTree(source_points)
 
-    batch_size = 10000
-    for batch_start in range(face_start, face_end, batch_size):
-        batch_end = min(batch_start + batch_size, face_end)
-        all_pixels_u = []
-        all_pixels_v = []
-        all_pos_3d = []
-        for fi in range(batch_start, batch_end):
-            uvs = face_uvs[fi]
-            verts = face_verts[fi]
-            pix = (uvs * (res - 1)).astype(np.int32)
-            u_min = max(pix[:, 0].min(), 0)
-            u_max = min(pix[:, 0].max(), res - 1)
-            v_min = max(pix[:, 1].min(), 0)
-            v_max = min(pix[:, 1].max(), res - 1)
-            if u_min > u_max or v_min > v_max:
-                continue
-            us = np.arange(u_min, u_max + 1)
-            vs = np.arange(v_min, v_max + 1)
-            grid_u, grid_v = np.meshgrid(us, vs)
-            pixels = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
-            if len(pixels) == 0:
-                continue
-            p = pixels.astype(np.float64)
-            v0 = pix[1].astype(np.float64) - pix[0].astype(np.float64)
-            v1 = pix[2].astype(np.float64) - pix[0].astype(np.float64)
-            v2 = p - pix[0].astype(np.float64)
-            dot00 = v0 @ v0
-            dot01 = v0 @ v1
-            dot11 = v1 @ v1
-            denom = dot00 * dot11 - dot01 * dot01
-            if abs(denom) < 1e-10:
-                continue
-            dot02 = v2 @ v0
-            dot12 = v2 @ v1
-            u_b = (dot11 * dot02 - dot01 * dot12) / denom
-            v_b = (dot00 * dot12 - dot01 * dot02) / denom
-            inside = (u_b >= -0.01) & (v_b >= -0.01) & (u_b + v_b <= 1.01)
-            if not inside.any():
-                continue
-            ins_pix = pixels[inside]
-            ub = u_b[inside]
-            vb = v_b[inside]
-            wb = 1.0 - ub - vb
-            pos = (wb[:, None] * verts[0] + ub[:, None] * verts[1]
-                   + vb[:, None] * verts[2])
-            all_pixels_u.append(ins_pix[:, 0])
-            all_pixels_v.append(ins_pix[:, 1])
-            all_pos_3d.append(pos)
-        if not all_pos_3d:
+    for fi in range(face_start, face_end):
+        uvs = face_uvs[fi]       # (3, 2)
+        cols = face_colors[fi]   # (3, 3) RGB float [0, 1]
+        pix = (uvs * (res - 1)).astype(np.int32)
+        u_min = max(pix[:, 0].min(), 0)
+        u_max = min(pix[:, 0].max(), res - 1)
+        v_min = max(pix[:, 1].min(), 0)
+        v_max = min(pix[:, 1].max(), res - 1)
+        if u_min > u_max or v_min > v_max:
             continue
-        batch_u = np.concatenate(all_pixels_u)
-        batch_v = np.concatenate(all_pixels_v)
-        batch_pos = np.concatenate(all_pos_3d)
-        dists, idxs = tree.query(batch_pos, k=knn)
-        weights = 1.0 / np.maximum(dists, 1e-8)
-        weights /= weights.sum(axis=1, keepdims=True)
-        colors = np.zeros((len(batch_pos), 3))
-        for k_i in range(knn):
-            colors += weights[:, k_i:k_i+1] * source_colors[idxs[:, k_i]]
-        colors_uint8 = np.clip(colors * 255, 0, 255).astype(np.uint8)
-        atlas[batch_v, batch_u] = colors_uint8
+        us = np.arange(u_min, u_max + 1)
+        vs = np.arange(v_min, v_max + 1)
+        grid_u, grid_v = np.meshgrid(us, vs)
+        pixels = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
+        if len(pixels) == 0:
+            continue
+        p = pixels.astype(np.float64)
+        v0 = pix[1].astype(np.float64) - pix[0].astype(np.float64)
+        v1 = pix[2].astype(np.float64) - pix[0].astype(np.float64)
+        v2 = p - pix[0].astype(np.float64)
+        dot00 = v0 @ v0
+        dot01 = v0 @ v1
+        dot11 = v1 @ v1
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) < 1e-10:
+            continue
+        dot02 = v2 @ v0
+        dot12 = v2 @ v1
+        u_b = (dot11 * dot02 - dot01 * dot12) / denom
+        v_b = (dot00 * dot12 - dot01 * dot02) / denom
+        inside = (u_b >= -0.01) & (v_b >= -0.01) & (u_b + v_b <= 1.01)
+        if not inside.any():
+            continue
+        ins_pix = pixels[inside]
+        ub = u_b[inside]
+        vb = v_b[inside]
+        wb = 1.0 - ub - vb
+        interp = wb[:, None] * cols[0] + ub[:, None] * cols[1] + vb[:, None] * cols[2]
+        colors_uint8 = np.clip(interp * 255, 0, 255).astype(np.uint8)
+        atlas[ins_pix[:, 1], ins_pix[:, 0]] = colors_uint8
     return atlas
 
 
-def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
-                       atlas_resolution=4096, knn=4, max_workers=1):
-    """Bake a texture atlas by projecting source point cloud colors onto UV space.
+def bake_texture_atlas(faces, uv_coords, vertex_colors,
+                       atlas_resolution=4096, max_workers=1):
+    """Bake a texture atlas by interpolating vertex colors via barycentrics.
 
-    For each texel covered by a triangle, interpolates 3D position via barycentric
-    coordinates, then queries the nearest source points via KD-tree and blends their
-    colors using inverse-distance weighting.
+    For each texel covered by a triangle, computes barycentric weights in UV
+    space and blends the three vertex colors accordingly.  This avoids KNN
+    queries against the point cloud and eliminates cross-surface color bleeding.
 
     Args:
-        vertices: (N, 3) float64 mesh vertex positions.
         faces: (F, 3) int array of triangle indices.
         uv_coords: (N, 2) float64 UV coordinates in [0, 1] per vertex.
-        source_points: (P, 3) float64 colored point cloud positions.
-        source_colors: (P, 3) float64 RGB colors in [0, 1].
+        vertex_colors: (N, 3) float64 RGB colors in [0, 1] per vertex.
         atlas_resolution: Width and height of the output atlas in pixels.
-        knn: Number of nearest source points used for IDW color blending.
         max_workers: Number of parallel workers (1 = sequential).
 
     Returns:
         atlas: (atlas_resolution, atlas_resolution, 3) uint8 RGB image.
     """
     res = atlas_resolution
-    face_uvs = uv_coords[faces]
-    face_verts = vertices[faces]
+    face_uvs = uv_coords[faces]           # (F, 3, 2)
+    face_colors = vertex_colors[faces]     # (F, 3, 3)
     n_faces = len(faces)
 
     # ── Parallel path ────────────────────────────────────────────────────────
@@ -468,10 +432,10 @@ def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
             max_workers=actual_workers,
             mp_context=_MP_CONTEXT,
             initializer=_bake_worker_init,
-            initargs=(source_points, source_colors, face_uvs, face_verts),
+            initargs=(face_uvs, face_colors),
         ) as executor:
             futures = [
-                executor.submit(_bake_face_chunk, start, end, res, knn)
+                executor.submit(_bake_face_chunk, start, end, res)
                 for start, end in face_chunks
             ]
             for future in futures:
@@ -480,69 +444,48 @@ def bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors,
                 atlas[mask] = partial[mask]
         return atlas
 
-    # ── Sequential path (original) ──────────────────────────────────────────
+    # ── Sequential path ─────────────────────────────────────────────────────
     atlas = np.zeros((res, res, 3), dtype=np.uint8)
-    tree = cKDTree(source_points)
-    batch_size = 10000
-    for batch_start in range(0, n_faces, batch_size):
-        batch_end = min(batch_start + batch_size, n_faces)
-        all_pixels_u = []
-        all_pixels_v = []
-        all_pos_3d = []
-        for fi in range(batch_start, batch_end):
-            uvs = face_uvs[fi]
-            verts = face_verts[fi]
-            pix = (uvs * (res - 1)).astype(np.int32)
-            u_min = max(pix[:, 0].min(), 0)
-            u_max = min(pix[:, 0].max(), res - 1)
-            v_min = max(pix[:, 1].min(), 0)
-            v_max = min(pix[:, 1].max(), res - 1)
-            if u_min > u_max or v_min > v_max:
-                continue
-            us = np.arange(u_min, u_max + 1)
-            vs = np.arange(v_min, v_max + 1)
-            grid_u, grid_v = np.meshgrid(us, vs)
-            pixels = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
-            if len(pixels) == 0:
-                continue
-            p = pixels.astype(np.float64)
-            v0 = pix[1].astype(np.float64) - pix[0].astype(np.float64)
-            v1 = pix[2].astype(np.float64) - pix[0].astype(np.float64)
-            v2 = p - pix[0].astype(np.float64)
-            dot00 = v0 @ v0
-            dot01 = v0 @ v1
-            dot11 = v1 @ v1
-            denom = dot00 * dot11 - dot01 * dot01
-            if abs(denom) < 1e-10:
-                continue
-            dot02 = v2 @ v0
-            dot12 = v2 @ v1
-            u_b = (dot11 * dot02 - dot01 * dot12) / denom
-            v_b = (dot00 * dot12 - dot01 * dot02) / denom
-            inside = (u_b >= -0.01) & (v_b >= -0.01) & (u_b + v_b <= 1.01)
-            if not inside.any():
-                continue
-            ins_pix = pixels[inside]
-            ub = u_b[inside]
-            vb = v_b[inside]
-            wb = 1.0 - ub - vb
-            pos = (wb[:, None] * verts[0] + ub[:, None] * verts[1] + vb[:, None] * verts[2])
-            all_pixels_u.append(ins_pix[:, 0])
-            all_pixels_v.append(ins_pix[:, 1])
-            all_pos_3d.append(pos)
-        if not all_pos_3d:
+    for fi in range(n_faces):
+        uvs = face_uvs[fi]
+        cols = face_colors[fi]
+        pix = (uvs * (res - 1)).astype(np.int32)
+        u_min = max(pix[:, 0].min(), 0)
+        u_max = min(pix[:, 0].max(), res - 1)
+        v_min = max(pix[:, 1].min(), 0)
+        v_max = min(pix[:, 1].max(), res - 1)
+        if u_min > u_max or v_min > v_max:
             continue
-        batch_u = np.concatenate(all_pixels_u)
-        batch_v = np.concatenate(all_pixels_v)
-        batch_pos = np.concatenate(all_pos_3d)
-        dists, idxs = tree.query(batch_pos, k=knn)
-        weights = 1.0 / np.maximum(dists, 1e-8)
-        weights /= weights.sum(axis=1, keepdims=True)
-        colors = np.zeros((len(batch_pos), 3))
-        for k_i in range(knn):
-            colors += weights[:, k_i:k_i+1] * source_colors[idxs[:, k_i]]
-        colors_uint8 = np.clip(colors * 255, 0, 255).astype(np.uint8)
-        atlas[batch_v, batch_u] = colors_uint8
+        us = np.arange(u_min, u_max + 1)
+        vs = np.arange(v_min, v_max + 1)
+        grid_u, grid_v = np.meshgrid(us, vs)
+        pixels = np.stack([grid_u.ravel(), grid_v.ravel()], axis=1)
+        if len(pixels) == 0:
+            continue
+        p = pixels.astype(np.float64)
+        v0 = pix[1].astype(np.float64) - pix[0].astype(np.float64)
+        v1 = pix[2].astype(np.float64) - pix[0].astype(np.float64)
+        v2 = p - pix[0].astype(np.float64)
+        dot00 = v0 @ v0
+        dot01 = v0 @ v1
+        dot11 = v1 @ v1
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) < 1e-10:
+            continue
+        dot02 = v2 @ v0
+        dot12 = v2 @ v1
+        u_b = (dot11 * dot02 - dot01 * dot12) / denom
+        v_b = (dot00 * dot12 - dot01 * dot02) / denom
+        inside = (u_b >= -0.01) & (v_b >= -0.01) & (u_b + v_b <= 1.01)
+        if not inside.any():
+            continue
+        ins_pix = pixels[inside]
+        ub = u_b[inside]
+        vb = v_b[inside]
+        wb = 1.0 - ub - vb
+        interp = wb[:, None] * cols[0] + ub[:, None] * cols[1] + vb[:, None] * cols[2]
+        colors_uint8 = np.clip(interp * 255, 0, 255).astype(np.uint8)
+        atlas[ins_pix[:, 1], ins_pix[:, 0]] = colors_uint8
     return atlas
 
 

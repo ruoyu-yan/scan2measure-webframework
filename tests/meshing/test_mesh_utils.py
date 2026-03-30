@@ -102,12 +102,10 @@ def test_uv_unwrap_mesh():
 
 
 def test_bake_texture_atlas():
-    vertices = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0]], dtype=np.float64)
     faces = np.array([[0,1,2],[0,2,3]], dtype=np.int32)
     uv_coords = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float64)
-    source_points = np.array([[0.25,0.25,0],[0.75,0.25,0],[0.25,0.75,0],[0.75,0.75,0]])
-    source_colors = np.full((4, 3), [1.0, 0.0, 0.0])
-    atlas = bake_texture_atlas(vertices, faces, uv_coords, source_points, source_colors, atlas_resolution=64, knn=4)
+    vertex_colors = np.full((4, 3), [1.0, 0.0, 0.0])
+    atlas = bake_texture_atlas(faces, uv_coords, vertex_colors, atlas_resolution=64)
     assert atlas.shape == (64, 64, 3)
     assert atlas.dtype == np.uint8
     nonzero = atlas[atlas.sum(axis=2) > 0]
@@ -148,14 +146,11 @@ def test_voxel_downsample_preserves_colors():
 
 def test_bake_texture_atlas_parallel():
     """Parallel baking produces same shape/dtype and similar colors."""
-    vertices = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0]], dtype=np.float64)
     faces = np.array([[0,1,2],[0,2,3]], dtype=np.int32)
     uv_coords = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float64)
-    source_points = np.array([[0.25,0.25,0],[0.75,0.25,0],[0.25,0.75,0],[0.75,0.75,0]])
-    source_colors = np.full((4, 3), [1.0, 0.0, 0.0])
-    atlas = bake_texture_atlas(vertices, faces, uv_coords, source_points,
-                               source_colors, atlas_resolution=64, knn=4,
-                               max_workers=2)
+    vertex_colors = np.full((4, 3), [1.0, 0.0, 0.0])
+    atlas = bake_texture_atlas(faces, uv_coords, vertex_colors,
+                               atlas_resolution=64, max_workers=2)
     assert atlas.shape == (64, 64, 3)
     assert atlas.dtype == np.uint8
     nonzero = atlas[atlas.sum(axis=2) > 0]

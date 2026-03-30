@@ -42,6 +42,8 @@ if str(sam3_repo_path) not in sys.path:
     sys.path.insert(0, str(sam3_repo_path))
 if str(script_dir) not in sys.path:
     sys.path.insert(0, str(script_dir))
+sys.path.insert(0, str(project_root / "src" / "utils"))
+from config_loader import load_config, progress
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -473,9 +475,14 @@ def process_pano(processor, img_path):
 # MAIN
 # ---------------------------------------------------------
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = load_config()
 
-    if len(sys.argv) >= 2:
+    out_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if cfg.get("input_path"):
+        target = Path(cfg["input_path"])
+    elif len(sys.argv) >= 2:
         target = Path(sys.argv[1])
         if not target.is_absolute():
             target = project_root / target
@@ -501,15 +508,16 @@ def main():
 
     print(f"SAM3 Pano Footprint Extraction")
     print(f"  Input:  {target}")
-    print(f"  Output: {OUTPUT_DIR}")
+    print(f"  Output: {out_dir}")
     print(f"  Panos:  {len(jpg_files)}")
 
     processor = load_model()
 
-    for img_path in jpg_files:
+    for i, img_path in enumerate(jpg_files):
+        progress(i + 1, len(jpg_files), f"Processing {img_path.stem}")
         process_pano(processor, img_path)
 
-    print(f"\nDone. Results in: {OUTPUT_DIR}")
+    print(f"\nDone. Results in: {out_dir}")
 
 
 if __name__ == "__main__":
