@@ -59,7 +59,10 @@ src/
 │   └── color_sampling.py          # Bilinear sampling + multi-pano IDW blending
 │
 ├── meshing/               # Point cloud → textured GLB mesh (parallel, quality-tiered)
-│   ├── mesh_reconstruction.py     # Orchestrator: 17-stage pipeline with quality tiers (preview/balanced/high)
+│   ├── test_mvs_texturing.py      # NEW: mvs-texturing wrapper (Poisson → texrecon → GLB)
+│   ├── cubemap_utils.py           # NEW: equirectangular pano → 6 cubemap pinhole faces
+│   ├── mesh_reconstruction.py     # Legacy: 17-stage vertex-color pipeline (Poisson + xatlas bake)
+│   ├── mesh_from_images.py        # Legacy: Open3D project_images_to_albedo approach (superseded by mvs-texturing)
 │   ├── mesh_utils.py              # Library: normals, Poisson, tiling, trimming, UV unwrap, texture baking + parallel workers
 │   └── export_gltf.py             # GLB export with PBR texture + metric metadata injection
 │
@@ -143,7 +146,8 @@ python src/features_2d/image_feature_extractionV2.py           # Stage 4: Per-pa
 python src/pose_estimation/multiroom_pose_estimation.py        # Stage 5: Multi-pano pose estimation (3D precompute once, 2D per-pano)
 python src/experiments/experiment_local_linefilter.py          # Stage 5b (optional): Voronoi-filtered pose re-estimation (saves R+t)
 python src/colorization/colorize_point_cloud.py                # Stage 6: Color point cloud from panoramas using poses
-conda run -n scan_env python src/meshing/mesh_reconstruction.py  # Stage 7: Colored PLY → textured GLB mesh (quality-tiered: ~6/11/20 min)
+conda run -n scan_env python src/meshing/test_mvs_texturing.py   # Stage 7: Uncolored PLY + panos + poses → textured GLB (mvs-texturing)
+# Legacy: conda run -n scan_env python src/meshing/mesh_reconstruction.py  # Colored PLY → vertex-color textured GLB
 ```
 
 **In-house path (V3):**
@@ -261,7 +265,24 @@ data/raw_point_cloud/*.ply + data/pano/raw/*.jpg + local_filter_results.json (R+
     (calls colorization/projection.py → visibility.py → color_sampling.py)
   → data/textured_point_cloud/<map>_textured.ply
 
-=== Meshing ===
+=== Meshing (mvs-texturing — current) ===
+
+data/raw_point_cloud/<name_noRGB>.ply + data/pano/raw/*.jpg + local_filter_results.json
+  → meshing/test_mvs_texturing.py  (Python wrapper for mvs-texturing CLI)
+    1. Load uncolored PLY → voxel downsample
+    2. Tiled Poisson reconstruction (6x6m tiles, 1m overlap) via mesh_utils
+    3. Merge tiles → decimate to target triangles
+    4. Export mesh as PLY
+    5. Convert panos → cubemap faces (cubemap_utils.py) + write .cam files (MVE format)
+    6. Run texrecon CLI (MRF view selection + global/local seam leveling)
+    7. Convert OBJ output → GLB via trimesh
+  → data/mesh/<map>/
+    <name>_texrecon.glb           (UV-textured via mvs-texturing)
+    texrecon_input_mesh.ply       (intermediate Poisson mesh)
+    texrecon_scene/               (cubemap images + .cam files)
+    texrecon_output.obj/.mtl/.png (texrecon raw output)
+
+=== Meshing (vertex-color — legacy) ===
 
 data/textured_point_cloud/<map>_textured.ply
   → meshing/mesh_reconstruction.py  (17-stage parallel pipeline, quality-tiered)
@@ -319,7 +340,9 @@ floorplan/align_polygons_demo6.py  (SAM3 jigsaw: enumerate assignments + optimiz
 | `colorization/visibility.py` | Library: `compute_visibility_depth_buffer`. Rasterizes to low-res depth buffer, marks points visible if within margin of frontmost depth. O(N) numpy |
 | `colorization/color_sampling.py` | Library: `sample_colors_bilinear` (scipy `map_coordinates` with horizontal wraparound padding), `blend_colors_idw` (inverse-distance-weighted accumulation across panoramas) |
 | `colorization/evaluate_colorization.py` | Ground-truth evaluation: compares colorized PLY against original scanner RGB. RGB L2 distance, CIEDE2000 Delta-E (perceptual), per-channel bias, error heatmap PLY output (green→red gradient, blue=uncolored) |
-| `meshing/mesh_reconstruction.py` | **Orchestrator**. 17-stage parallel pipeline with quality tiers (preview/balanced/high). Tile processing parallelized via `ProcessPoolExecutor` (spawn context). Texture baking also parallel. `QUALITY_TIER` config selects Poisson depth (7/8/9), voxel size, atlas resolution, and target triangles. Balanced tier: ~11 min on 32-core system. Timing breakdown printed at end |
+| `meshing/test_mvs_texturing.py` | **Current meshing pipeline**. Python wrapper for mvs-texturing CLI. Loads uncolored PLY + panos + poses → tiled Poisson reconstruction → export PLY → cubemap conversion + .cam files → `texrecon` CLI (MRF view selection + seam leveling) → OBJ → GLB via trimesh. Calls `texrecon` as external binary (same pattern as `3DLineDetection`) |
+| `meshing/cubemap_utils.py` | Library: `equirect_to_cubemap_faces` (pano → 6 pinhole cubemap faces via cv2.remap), `build_cubemap_cameras` (intrinsic/extrinsic matrices per face). Coordinate convention matches `projection.py` (Z=up camera frame) |
+| `meshing/mesh_reconstruction.py` | **Legacy orchestrator**. 17-stage vertex-color pipeline (Poisson + xatlas bake). Superseded by mvs-texturing for texture quality, kept as fallback |
 | `meshing/mesh_utils.py` | Library: `estimate_normals`, `poisson_reconstruct`, `remove_low_density`, `transfer_vertex_colors`, `_process_single_tile` (parallel worker), `process_tiles_parallel`, `compute_tile_grid`, `extract_tile_points`, `trim_to_ownership_region`, `merge_tile_meshes`, `uv_unwrap_mesh`, `_bake_face_chunk` (parallel worker), `bake_texture_atlas` (supports `max_workers`), `dilate_texture` |
 | `meshing/export_gltf.py` | `export_textured_glb` (trimesh PBR material + `_inject_gltf_metadata` for metric unit/scale in asset.extras), `export_vertex_color_ply` (Open3D PLY writer) |
 | `legacy/PnL_solver.py` | Legacy ICP module (unused by active pipeline, kept for reference). Contains `refine_pose_icp()` (V1) and `refine_pose_full()` (V2) |
@@ -511,11 +534,48 @@ glTFast's X-negation flips triangle winding order, which inverts normals. This c
 node app/scripts/dev.js
 ```
 
-`app/scripts/dev.js` replaces the `concurrently`-based `npm run electron:dev` script because `cmd.exe` (used by npm/concurrently on Windows) cannot handle UNC paths (`\\wsl.localhost\...`) as CWD. The script starts Vite and Electron directly via Node.js `spawn()` with explicit `cwd`, bypassing the shell entirely.
+`app/scripts/dev.js` starts Vite + Electron directly via Node.js `spawn()` with explicit `cwd`, bypassing cmd.exe (which cannot handle UNC paths as CWD).
 
-**Unity launcher** (`app/src/main/unity-launcher.ts`): Detects WSL via `/proc/sys/fs/binfmt_misc/WSLInterop`, converts file paths from Linux to Windows format using `wslpath -w` before passing to Unity.exe. Auto-discovers `camera_pose.json` from `data/pose_estimates/multiroom/` (prefers rooms over corridors).
+**Pipeline engine** (`app/src/main/pipeline-engine.ts`): Spawns Python scripts via `conda run -n <env>`. Logs to `data/logs/` via `logger.ts`.
 
-**Pipeline engine** (`app/src/main/pipeline-engine.ts`): Spawns Python scripts via `conda run -n <env>`. Currently assumes `conda` is available in PATH (works in WSL where conda is installed).
+**Unity launcher** (`app/src/main/unity-launcher.ts`): WSL path translation via `wslpath -w` before passing to Unity.exe.
+
+### Pipeline Stage Definitions
+
+13 stages defined in `app/src/shared/constants.ts` (`FULL_PIPELINE_STAGES`):
+
+| Index | ID | Name | Visualization | perPano |
+|-------|----|------|--------------|---------|
+| 0 | density_image | Density Image | ImageViewer (overlay PNG) | no |
+| 1 | sam3_segmentation | Room Segmentation | ImageViewer (overlay PNG) | no |
+| 2 | sam3_polygons | Mask to Polygons | PolygonViewer (density + polygon outlines) | no |
+| 3 | pano_footprints | Pano Footprints | ImageGallery (debug.png per pano) | yes |
+| 4 | polygon_matching | Polygon Matching | ImageViewer (alignment PNG) | no |
+| 5 | confirm_matching | Confirm Matching | ConfirmMatching (interactive drag-to-reassign) | no |
+| 6 | line_detection_3d | 3D Line Detection | ObjViewer (_lines.obj with vertex colors) | no |
+| 7 | line_detection_2d | 2D Feature Extraction | ImageGallery (grouped_lines.png per pano) | yes |
+| 8 | pose_estimation | Pose Estimation | ImageGallery (topdown.png per pano) | no |
+| 9 | colorization | Colorization | PlyViewer (colored PLY) | no |
+| 10 | confirm_colorization | Inspect Colorization | PlyViewer + quality tier select + confirm | no |
+| 11 | meshing | Meshing | progress (during run) | no |
+| 12 | done | Complete | ThreeViewer (GLB) + Launch Tour button | no |
+
+Stages 5 and 10 are confirmation gates (viewType: "confirmation", no scripts). The pipeline auto-runs all other stages sequentially. When a stage is running, the visualization area shows the previous stage's output (dimmed) with a running overlay badge.
+
+### Artifact Resolution
+
+`artifacts:resolve` IPC in `index.ts` resolves per-stage output files from the data directory. Key paths:
+- Density image: `data/density_image/<pcName>/<pcName>.png`
+- Segmentation overlay: `data/sam3_room_segmentation/<pcName>/<pcName>_overlay.png`
+- Polygons JSON: `data/sam3_room_segmentation/<pcName>/<pcName>_polygons.json`
+- Pano footprints: `data/sam3_pano_processing/<panoName>/debug.png`
+- Alignment: `data/sam3_room_segmentation/<pcName>/demo6_alignment.{json,png}`
+- 3D lines OBJ: `data/debug_renderer/<pcName>/<pcName>_lines.obj`
+- 2D features: `data/pano/2d_feature_extracted/<panoName>_v2/grouped_lines.png`
+- Topdown poses: `data/pose_estimates/multiroom/<panoName>/vis/topdown.png`
+- Colored PLY: `data/textured_point_cloud/<pcName>/<pcName>_textured.ply`
+
+Large files (e.g., 140MB PLY) are served via the `local-file://` custom Electron protocol instead of base64 IPC.
 
 ### External Subdirectories
 
@@ -525,6 +585,7 @@ node app/scripts/dev.js
 - `Open3D-ML/` — 3D geometric processing utilities
 - `sam3/` — Segment Anything Model 3
 - `3DLineDetection/` — C++ library for fast 3D line segment detection from point clouds (arXiv:1901.02532). Used by `geometry_3d/point_cloud_geometry_baker_V4.py`. Build with CMake in `3DLineDetection/build/`
+- `mvs-texturing/` — C++ mesh texturing tool (ECCV 2014 "Let There Be Color!"). MRF-based optimal view selection per face + global/local seam leveling. Called as CLI binary `mvs-texturing/build/apps/texrecon/texrecon` from `meshing/test_mvs_texturing.py`. Built with CMake; requires `libpng-dev libjpeg-dev libtiff-dev libtbb-dev`. Build note: MVE dependency needs `Makefile.inc` patched to `-std=c++14` (PATCH_COMMAND in `elibs/CMakeLists.txt` handles this)
 - `RandLA-Net/` — Point cloud semantic segmentation model (NeurIPS 2019). Models only; not actively used in the pipeline
 - `panoramic-localization/` — Research library implementing PICCOLO, CPO, LDL, FGPL localization algorithms. FGPL math reimplemented independently in `pose_estimation/pose_search.py`, `pose_estimation/pose_refine.py`, `pose_estimation/xdf_distance.py`, `geometry_3d/line_clustering_3d.py`. Legacy test scripts (`legacy/test_FGPL_*.py`) call native code for baseline comparison. See `panoramic-localization/CLAUDE.md` for detailed architecture
 - `Archive/` — Deprecated script versions: `feature_matchingV2.py` (monolithic pose estimation), `feature_matching.py` (V1 legacy), `compare_filtering_approaches.py`, old renderers, old geometry bakers, old alignment demos

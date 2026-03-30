@@ -259,11 +259,11 @@ Compares colorized PLY against original scanner RGB (Leica BLK360 G1 — same ca
 
 ---
 
-## Phase 4: Meshing 🔴
+## Phase 4: Meshing 🟡
 
-**Status**: 🔴 Current Poisson-based approach produces geometrically correct meshes but visually unsatisfactory textured GLBs. The vertex-colored PLY looks correct, but the textured GLB has persistent color artifacts. A new meshing technique needs to be developed.
+**Status**: 🟡 mvs-texturing integrated — texture quality confirmed good. Geometry pipeline needs tiled Poisson (current whole-cloud approach loses thin structures) and double-sided face fix.
 
-Convert the colored point cloud into a UV-textured triangle mesh for real-time rendering and measurement.
+Convert the uncolored point cloud into a UV-textured triangle mesh using panoramic images and estimated camera poses.
 
 ### 4.1 Surface Reconstruction (Poisson — current, problematic) 🔴
 
@@ -286,15 +286,19 @@ Convert the colored point cloud into a UV-textured triangle mesh for real-time r
 
 **Scripts**: `src/meshing/mesh_reconstruction.py` (orchestrator), `src/meshing/mesh_utils.py` (library), `src/meshing/export_gltf.py` (GLB export)
 
-### 4.2 New Meshing Technique Needed ⬜
+### 4.2 mvs-texturing Integration (in progress) 🟡
 
-The current Poisson + UV atlas approach is fundamentally limited for producing visually high-quality textured meshes from colored point clouds. A new technique should be explored that better preserves the realistic appearance of the source point cloud in the final GLB.
+Replaced Open3D `project_images_to_albedo()` with [mvs-texturing](https://github.com/nmoehrle/mvs-texturing) — a standalone C++ CLI tool implementing the ECCV 2014 "Let There Be Color!" algorithm (MRF-based optimal view selection per face + global/local seam leveling). Produces significantly better texture quality than Open3D's softmax blending (mean brightness 160 vs 106, saturation 20.8 vs 4.6).
 
-**Possible directions**:
-- Alternative surface reconstruction methods (TSDF, neural implicit surfaces, alpha shapes)
-- Direct panoramic image projection onto mesh (bypass point cloud colors entirely — project panorama textures onto the mesh using known camera poses)
-- Gaussian splatting or point-based rendering (skip triangle meshes for visual quality, keep mesh only for measurement)
-- Higher-fidelity texture baking (GPU-based, higher atlas resolution, normal-aware sampling)
+**What works**: `texrecon` binary built and integrated via Python wrapper (`src/meshing/test_mvs_texturing.py`). Equirectangular panos converted to 6 cubemap pinhole faces each, `.cam` files written in MVE format, texrecon produces OBJ+texture atlas, converted to GLB via trimesh. Color quality confirmed good in Unity.
+
+**Next steps**:
+- [ ] **Tiled Poisson reconstruction**: Current test script uses whole-cloud Poisson at depth 7, which is too coarse for the full bounding box (~23cm/cell). Switch to the existing tiled parallel pipeline from `mesh_utils.py` (6x6m tiles, 1m overlap) so depth 8 gives ~4.7cm/cell — sufficient for walls and thin structures. The code is written but not yet tested.
+- [ ] **Wall single-side visibility**: Poisson produces single-sided faces. Unity's backface culling makes walls only visible from one direction. Fix: either flip triangle winding in `GLBLoader.cs` (existing fix for glTFast import) or set material to double-sided in the GLB export step.
+
+**Architecture decision**: Keep `texrecon` as an external CLI binary (same pattern as `3DLineDetection`). The Python wrapper handles data prep (cubemap conversion, `.cam` files, OBJ→GLB). `texrecon` is a black box — replaceable without touching the rest of the pipeline.
+
+**Scripts**: `src/meshing/test_mvs_texturing.py` (test wrapper), `src/meshing/cubemap_utils.py` (equirect→cubemap), `mvs-texturing/` (external C++ tool at project root)
 
 **Design spec**: `docs/superpowers/specs/2026-03-23-balanced-mesh-reconstruction-design.md`
 
@@ -323,30 +327,67 @@ Add `--config <json>` CLI support and `[PROGRESS]` stdout protocol to all 11 pip
 
 **Completed**: `src/utils/config_loader.py` created. All 11 pipeline scripts import `load_config()` and `progress()`. Scripts fall back to hardcoded defaults when `--config` is not provided, maintaining backward compatibility.
 
-### 5.2 Electron App ✅ (GUI tested)
+### 5.2 Electron App 🟡 (pipeline stages 0-9 tested, visualization polished)
 
-Pipeline hub with React UI: home screen (3 entry cards + recent projects), pipeline view (sidebar + animated canvas), confirmation gate (draggable polygon correction + re-run), Three.js 3D preview (OBJ/PLY/GLB), project management (JSON store, per-project directories).
+Pipeline hub with React UI: home screen (3 entry cards + recent projects), pipeline view (sidebar + filmstrip + per-stage visualization), confirmation gates (polygon matching correction + colorization inspection), Three.js 3D preview (OBJ/PLY/GLB), project management (JSON store, per-project directories).
 
 **Plan**: `docs/superpowers/plans/2026-03-24-electron-app.md` (37 tasks)
 
-**Completed** (2026-03-25): 31 source files under `app/`. TypeScript compiles clean (both renderer and main process configs, zero errors). npm dependencies installed (558 packages).
+**Completed** (2026-03-25): Initial 31 source files under `app/`. TypeScript compiles clean.
+
+**Pipeline execution tested** (2026-03-30): Stages 0-9 (density image through colorization) run successfully via `conda run`. Stage 5 (confirm matching) loads interactive UI. Polygon matching is slow (~3.5 min for 3 panos, `differential_evolution` optimizer).
+
+**Per-stage visualization components** (2026-03-30):
+- `Filmstrip.tsx` — Thumbnail ribbon of completed stages at top of pipeline view
+- `ImageViewer.tsx` — Single image display (density image, segmentation overlay, matching result)
+- `ImageGallery.tsx` — Multi-image grid with click-to-expand (pano footprints, 2D features, topdown poses)
+- `PolygonViewer.tsx` — Canvas overlay: density image + extracted room polygon outlines from `_polygons.json`
+- `ConfirmMatching.tsx` — Interactive canvas: draggable pano markers on density image, popup with pano thumbnail + room assignment, point-in-polygon hit testing for reassignment
+- `ObjViewer.tsx` — Three.js `LineSegments` for `_lines.obj` (vertex colors, orbit controls, auto-fit camera)
+- `PlyViewer.tsx` — Three.js `Points` for colored PLY (PLYLoader via `local-file://` protocol, auto-downsample >2M pts, orbit controls)
+- `RunningOverlay` — While a stage runs, shows the previous stage's visualization (dimmed) with a floating badge (spinner + stage name + elapsed time) instead of a log console
+
+**Confirmation gates**:
+1. **Confirm Matching** (after stage 4 polygon matching) — Verify pano-to-room assignments, drag markers to reassign
+2. **Inspect Colorization** (after stage 9 colorization) — View colored point cloud in 3D, select mesh quality tier (preview/balanced/high), then proceed to meshing
+
+**Key infrastructure**:
+- `artifacts:resolve` IPC — Resolves output file paths per stage from project data
+- `artifacts:read-image` IPC — Reads local files as base64 data URIs for renderer
+- `local-file://` custom protocol — Serves large local files (e.g., 140MB PLY) to renderer without base64 overhead
+- `pipeline:write-config` IPC — Generates per-stage config JSON with stage-specific `input_path` mapping
+- `logger.ts` — File-based logging to `data/logs/` with timestamped entries and `latest.log` symlink
+- Per-pano execution loop in `usePipeline.ts` for stages 3 (pano footprints) and 7 (2D features)
 
 **Key files**:
-- `app/src/main/index.ts` — Electron main process, IPC handlers, file dialogs
+- `app/src/main/index.ts` — Electron main process, IPC handlers, file dialogs, artifact resolution, `local-file://` protocol
 - `app/src/main/pipeline-engine.ts` — Conda subprocess spawner, `[PROGRESS]` parser, process group kill
 - `app/src/main/project-store.ts` — JSON-based project CRUD
-- `app/src/main/unity-launcher.ts` — Spawns Unity .exe with CLI args, WSL path translation, auto-discovers camera pose
-- `app/src/renderer/pages/PipelinePage.tsx` — Pipeline orchestration UI
-- `app/src/renderer/components/ConfirmationGate.tsx` — Draggable polygon correction
-- `app/src/renderer/components/ThreeViewer.tsx` — Three.js OBJ/PLY/GLB viewer
-- `app/src/shared/constants.ts` — Stage definitions, conda envs, script paths
+- `app/src/main/unity-launcher.ts` — Spawns Unity .exe with CLI args, WSL path translation
+- `app/src/main/logger.ts` — File-based logging system
+- `app/src/renderer/pages/PipelinePage.tsx` — Pipeline orchestration UI with artifact resolution
+- `app/src/renderer/hooks/usePipeline.ts` — Pipeline state machine with per-pano loop and mutex
+- `app/src/renderer/components/StageCanvas.tsx` — Routes stageId to appropriate visualization component
+- `app/src/shared/constants.ts` — 13 stage definitions (0-12), conda envs, script paths
 - `app/scripts/dev.js` — Dev server launcher (bypasses cmd.exe UNC path limitations)
 
-**Code-reviewed and fixed**: IPC channel allowlist (security), config JSON generation, React hooks ordering, CSP for file:// fetch, Three.js memory disposal, subprocess process-group kill.
+**Bugs fixed during testing** (2026-03-30):
+- `--no-banner` conda flag not supported → removed
+- Config JSON missing `map_name`, `pano_names` → added to write-config
+- Wrong script path for SAM3_mask_to_polygons → fixed to `src/experiments/`
+- `perPano` flag ignored → added per-pano loop in usePipeline
+- No mutex on runCurrentStage → added isRunningRef
+- Stale closure in setState → use `prev.currentStage`
+- Pre-existing artifacts showing before stages complete → only resolve for current-run completions
+- Double Electron windows → simplified dev.js
+- `room_name`/`pano_path` config key aliases → added for per-pano stages
 
-**Dev environment** (2026-03-30): Electron runs from WSL via WSLg. `app/scripts/dev.js` starts Vite + Electron without `concurrently` (cmd.exe cannot handle UNC paths as CWD). Launch: `node app/scripts/dev.js` from repo root.
+**Dev environment** (2026-03-30): Electron runs from WSL via WSLg. `app/scripts/dev.js` starts Vite + Electron. Launch: `node app/scripts/dev.js` from repo root.
 
-**Remaining**: Pipeline stage execution test (Electron → conda → Python), stage icons (`app/assets/icons/`), Vite production build.
+**Remaining**:
+- Debug ConfirmMatching visualization (coordinate transforms, marker drag behavior)
+- Test stages 10-12 (meshing + done) end-to-end
+- Stage icons (`app/assets/icons/`), Vite production build
 
 ### 5.3 Unity Virtual Tour ✅ (built and tested)
 
@@ -416,13 +457,14 @@ Unity project created in Unity 2022.3 on Windows. GLTFast 6.9.0 + TextMeshPro pa
 | 2.6 | Consolidate pose codebase | ✅ Done | — |
 | 2.7 | Jigsaw-informed improvements | 🟡 B+D done, A+C not started | `experiment_polygon_prior.py`, `experiment_local_linefilter.py` |
 | 3 | Point cloud coloring | ✅ Implemented, validated | `colorize_point_cloud.py`, `evaluate_colorization.py` + library modules |
-| 4 | Meshing | 🔴 Geometry OK, textured GLB visually poor | `mesh_reconstruction.py`, `mesh_utils.py`, `export_gltf.py` |
+| 4 | Meshing | 🟡 mvs-texturing integrated, needs tiled Poisson + double-sided faces | `test_mvs_texturing.py`, `cubemap_utils.py`, `mvs-texturing/` |
 | 4.2 | New meshing technique | ⬜ Current approach insufficient, needs rethink | — |
 | 5.1 | Python script modifications (config + progress) | ✅ All 11 scripts wired | `src/utils/config_loader.py` |
-| 5.2 | Electron desktop app | ✅ GUI tested, Tour Only flow working | `app/src/` |
+| 5.2 | Electron desktop app | 🟡 Stages 0-9 tested, per-stage viz polished (2026-03-30) | `app/src/` (8 new viz components) |
 | 5.3 | Unity virtual tour | ✅ Built and tested (15 scripts + 1 shader) | `unity/Assets/Scripts/`, `unity/Assets/Shaders/` |
 | 5.4 | Unity Editor setup + build | ✅ Windows .exe working (2026-03-27) | `VirtualTour/Build/VirtualTour.exe` |
 | 5.5 | Integration test (Tour Only) | ✅ Electron → Unity with GLB + camera pose (2026-03-30) | `unity-launcher.ts`, `dev.js` |
+| 5.6 | Integration test (Pipeline) | 🟡 Stages 0-9 pass, meshing + confirm viz need testing | `usePipeline.ts`, `pipeline-engine.ts` |
 
 ---
 
@@ -439,27 +481,30 @@ Phase 5.3 (measurement) depends on Phase 4 (mesh) or can work directly on the po
 
 ---
 
-## Next Steps (as of 2026-03-25)
+## Next Steps (as of 2026-03-30)
 
 1. ~~**Evaluate SAM3 footprint quality** (Phase 1.4)~~ — ✅ Done.
 
-2. ~~**Integrate SAM3 footprints into polygon matching** (Phase 1.3 → 1.4)~~ — ✅ Done. `align_polygons_demo6.py` implements enumerate+optimize jigsaw matching. Correct room assignments and scale ≈ 1.2 validated against ground truth poses.
+2. ~~**Integrate SAM3 footprints into polygon matching** (Phase 1.3 → 1.4)~~ — ✅ Done.
 
-3. **Wire demo6 output into multiroom_pose_estimation.py** (Phase 1 → 2.5) — `multiroom_pose_estimation.py` currently reads `global_alignment.json` from the RoomFormer path. Update it to optionally read `demo6_alignment.json` from `data/sam3_room_segmentation/<map>/` for Voronoi-based local line filtering.
+3. ~~**Wire demo6 output into multiroom_pose_estimation.py** (Phase 1 → 2.5)~~ — ✅ Done.
 
-4. **Update the production multi-room pose estimation pipeline** (Phase 2.7 → 2.5) — Integrate the validated local 3D line filtering (Voronoi-based, from `experiment_local_linefilter.py`) into `multiroom_pose_estimation.py`. The experiment proved that filtering 3D lines per-panorama eliminates cross-room false minima (office1: 2.3m error → sub-cm).
+4. ~~**Update the production multi-room pose estimation pipeline** (Phase 2.7 → 2.5)~~ — ✅ Done. Local line filtering integrated into `multiroom_pose_estimation.py`.
 
 5. ~~**Color the point cloud** (Phase 3)~~ — ✅ Done.
 
-6. **Develop new meshing approach** (Phase 4.2) — Current Poisson + UV atlas pipeline produces geometrically correct meshes but visually poor textured GLBs. The vertex-colored PLY looks good but the GLB does not. Need to explore alternative techniques (direct panoramic projection, TSDF, higher-fidelity baking, or non-mesh rendering).
+6. **Finish mvs-texturing pipeline** (Phase 4.2) — mvs-texturing integrated and texture quality confirmed. Two remaining issues: (a) switch to tiled Poisson reconstruction so thin structures (walls, floors, ceilings) are preserved, (b) fix single-sided wall visibility (double-sided material or triangle winding fix).
 
-8. ~~**Build end-to-end desktop app** (Phase 5)~~ — ✅ Code complete (2026-03-25). All three sub-plans implemented:
-   - ~~Python script modifications (14 tasks)~~ ✅ `config_loader.py` + all 11 scripts wired
-   - ~~Electron app (37 tasks)~~ ✅ 31 files, TypeScript compiles clean, code-reviewed and fixed
-   - ~~Unity virtual tour (16 tasks)~~ ✅ 13 C# scripts (1,326 LOC), code-reviewed and fixed
+7. ~~**Build end-to-end desktop app** (Phase 5)~~ — ✅ Code complete (2026-03-25). All three sub-plans implemented.
 
-9. ~~**Unity Editor setup** (Phase 5.4)~~ — ✅ Done (2026-03-27). Unity project created, all scripts attached, Windows .exe built and tested with `--glb` and `--camera-pose` args.
+8. ~~**Unity Editor setup** (Phase 5.4)~~ — ✅ Done (2026-03-27).
 
-10. ~~**Integration test (Tour Only)**~~ — ✅ Done (2026-03-30). Electron launches via `node app/scripts/dev.js` (WSLg), Tour Only entry selects GLB, Electron auto-discovers camera pose from `data/pose_estimates/multiroom/`, launches Unity .exe with `--glb` and `--camera-pose` (WSL→Windows path translation via `wslpath -w`). Player spawns inside the office room correctly.
+9. ~~**Integration test (Tour Only)**~~ — ✅ Done (2026-03-30).
 
-11. **Integration test (Pipeline)** — Test Electron → Python pipeline execution. `pipeline-engine.ts` calls `conda run` which needs to work from the WSL Electron process. Verify `[PROGRESS]` parsing and stage completion flow.
+10. ~~**Integration test (Pipeline stages 0-9)**~~ — ✅ Done (2026-03-30). All stages from density image through colorization execute correctly. Per-stage visualizations implemented and polished. Two confirmation gates working (polygon matching + colorization inspection).
+
+11. **Integration test (Pipeline stages 10-12)** — Test meshing + done stages end-to-end. Verify the `confirm_colorization` gate correctly passes quality tier to meshing stage, GLB output loads in the done stage, and Unity launch works from the pipeline completion screen.
+
+12. **Debug ConfirmMatching visualization** — User reported "not working well" at the confirm matching stage. Likely issues with coordinate transforms from `demo6_alignment.json` world-meter coordinates to canvas pixel coordinates, marker positions, popup behavior, or room polygon rendering.
+
+13. **Polygon matching performance** — `align_polygons_demo6.py` takes ~3.5 min for 3 panos due to `differential_evolution`. Consider adding progress output to the script or investigating faster optimization approaches.
