@@ -1,0 +1,237 @@
+.home {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48px 32px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.home__header {
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+.home__title {
+  font-size: 2.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.home__subtitle {
+  margin-top: 8px;
+  font-size: 1rem;
+  color: var(--text-secondary);
+}
+
+/* Entry point cards */
+.home__cards {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 48px;
+}
+
+.entry-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 24px;
+  width: 240px;
+  background: var(--bg-card);
+  border: 2px solid transparent;
+  border-radius: 12px;
+  color: var(--text-primary);
+  transition: border-color 0.2s, transform 0.15s;
+}
+
+.entry-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.entry-card__icon {
+  font-size: 2rem;
+  margin-bottom: 12px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.entry-card__title {
+  font-size: 1.1rem;
+  margin-bottom: 8px;
+}
+
+.entry-card__desc {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  text-align: center;
+  line-height: 1.4;
+}
+
+/* Recent projects */
+.recent-projects {
+  width: 100%;
+  max-width: 700px;
+}
+
+.recent-projects--empty {
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.recent-projects__title {
+  font-size: 1.2rem;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--bg-card);
+  padding-bottom: 8px;
+}
+
+.recent-projects__list {
+  list-style: none;
+}
+
+.recent-projects__item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.recent-projects__item:hover {
+  background: var(--bg-secondary);
+}
+
+.recent-projects__name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.recent-projects__status {
+  font-size: 0.8rem;
+  padding: 2px 10px;
+  border-radius: 10px;
+  margin-right: 16px;
+}
+
+.recent-projects__status--completed { background: var(--success); color: #fff; }
+.recent-projects__status--in_progress { background: var(--accent); color: #fff; }
+.recent-projects__status--error { background: var(--error); color: #fff; }
+.recent-projects__status--pending { background: var(--pending); color: #fff; }
+
+.recent-projects__date {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+/* File upload dialog */
+.file-upload-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.file-upload-dialog {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 32px;
+  width: 460px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.file-upload-dialog h2 {
+  margin-bottom: 20px;
+}
+
+.file-upload-field {
+  margin-bottom: 16px;
+}
+
+.file-upload-field label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.file-upload-field input[type="text"] {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--bg-card);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+.file-upload-btn {
+  width: 100%;
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.file-upload-btn:hover {
+  background: var(--bg-primary);
+}
+
+.file-upload-filelist {
+  list-style: none;
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.file-upload-filelist li {
+  padding: 2px 0;
+}
+
+.file-upload-error {
+  color: var(--error);
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+}
+
+.file-upload-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+/* Shared button styles */
+.btn {
+  padding: 8px 20px;
+  border-radius: 6px;
+  border: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn--primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn--secondary {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.btn--secondary:hover {
+  background: var(--bg-primary);
+}

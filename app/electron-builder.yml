@@ -1,0 +1,12 @@
+appId: com.scan2measure.app
+productName: scan2measure
+directories:
+  output: release
+  buildResources: assets
+files:
+  - dist/**/*
+  - node_modules/**/*
+  - package.json
+win:
+  target: dir
+  icon: assets/icons/icon.ico
