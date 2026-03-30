@@ -215,3 +215,11 @@ Open3D-ML/
 PointNeXt/
 RandLA-Net/
 RoomFormer/
+3DLineDetection/
+panoramic-localization/
+sam3/
+.superpowers/
+
+# Electron app build artifacts
+app/node_modules/
+app/dist/
