@@ -128,7 +128,8 @@ def _process_single_tile(tile_idx, core_min, core_max, tile_points, tile_colors,
         del pcd
         return (tile_idx, None, 0, 0, time.time() - t)
 
-    mesh = transfer_vertex_colors(mesh, pcd)
+    if pcd.has_colors():
+        mesh = transfer_vertex_colors(mesh, pcd)
     del pcd
 
     n_verts = len(mesh.vertices)
