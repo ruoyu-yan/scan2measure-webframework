@@ -74,7 +74,7 @@ export default function ThreeViewer({ objPath, plyPath, glbPath }: ThreeViewerPr
     if (filePath) {
       setLoading(true);
       setError(null);
-      const fileUrl = `file://${filePath}`;
+      const fileUrl = `local-file://${filePath}`;
 
       if (glbPath) {
         new GLTFLoader().load(

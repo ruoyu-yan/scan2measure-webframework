@@ -15,6 +15,7 @@ export interface ResolvedArtifacts {
   images?: string[];
   objPath?: string;
   plyPath?: string;
+  glbPath?: string;
   alignmentJson?: string;
   densityImage?: string;
   polygonsJson?: string;
@@ -52,6 +53,7 @@ interface StageCanvasProps {
   onCorrect?: (correctedAlignment: unknown) => void;
   onRetry?: () => void;
   onBack?: () => void;
+  onLaunchTour?: (glbPath: string) => void;
 }
 
 function formatElapsed(ms: number): string {
@@ -100,8 +102,9 @@ function renderStageVisualization(stageId: string, ra: ResolvedArtifacts): JSX.E
     return <ObjViewer objPath={ra.objPath} />;
   }
 
-  // Colorization / confirm colorization: colored point cloud PLY viewer
-  if ((stageId === "colorization" || stageId === "confirm_colorization") && ra.plyPath) {
+  // Colorization: colored point cloud PLY viewer
+  // (confirm_colorization is handled separately with quality tier + confirm overlay)
+  if (stageId === "colorization" && ra.plyPath) {
     return <PlyViewer plyPath={ra.plyPath} />;
   }
 
@@ -156,6 +159,7 @@ function renderContent(props: StageCanvasProps) {
         <ConfirmMatching
           densityImagePath={ra.densityImage}
           alignmentJsonPath={ra.alignmentJson}
+          polygonsJsonPath={ra.polygonsJson}
           panoThumbnails={ra.panoThumbnails || {}}
           onConfirm={props.onConfirm || (() => {})}
           onCorrect={props.onCorrect}
@@ -257,14 +261,57 @@ function renderContent(props: StageCanvasProps) {
     );
   }
 
-  // Done stage: 3D viewer for GLB
+  // Done stage: 3D GLB viewer + Launch Virtual Tour button
   if (stageId === "done") {
+    const glbPath = ra?.glbPath || props.artifacts.glbPath;
     return (
-      <ThreeViewer
-        objPath={props.artifacts.objPath}
-        plyPath={props.artifacts.plyPath}
-        glbPath={props.artifacts.glbPath}
-      />
+      <div style={{ position: "relative", width: "100%", height: "100%" }}>
+        {glbPath ? (
+          <ThreeViewer glbPath={glbPath} />
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#8888aa" }}>
+            No mesh found. Run the meshing stage first.
+          </div>
+        )}
+        {glbPath && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 24,
+              left: "50%",
+              transform: "translateX(-50%)",
+              background: "rgba(30, 41, 59, 0.95)",
+              borderRadius: 12,
+              padding: "16px 28px",
+              display: "flex",
+              alignItems: "center",
+              gap: 20,
+              boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+              zIndex: 20,
+            }}
+          >
+            <div style={{ color: "#94a3b8", fontSize: 13 }}>
+              Pipeline complete — mesh is ready.
+            </div>
+            <button
+              className="btn btn--primary"
+              onClick={() => props.onLaunchTour?.(glbPath)}
+              style={{
+                padding: "10px 28px",
+                fontSize: 14,
+                fontWeight: 600,
+                background: "#e94560",
+                border: "none",
+                borderRadius: 8,
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              Launch Virtual Tour
+            </button>
+          </div>
+        )}
+      </div>
     );
   }
 

@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pipeline Visualization Mockup v2</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; overflow: hidden; }
+
+  .sidebar { width: 220px; background: #16213e; padding: 16px 0; flex-shrink: 0; overflow-y: auto; }
+  .sidebar h2 { padding: 0 16px 12px; font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+  .stage-item { padding: 10px 16px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.15s; }
+  .stage-item:hover { background: #1a2744; }
+  .stage-item.active { background: #0f3460; border-left: 3px solid #e94560; }
+  .stage-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.complete { background: #4ade80; }
+  .dot.active-dot { background: #fbbf24; animation: pulse 1.5s infinite; }
+  .dot.pending { background: #555; }
+  .dot.confirm { background: #60a5fa; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .header { padding: 16px 24px 8px; flex-shrink: 0; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header p { font-size: 12px; color: #888; margin-top: 2px; }
+
+  /* Filmstrip ribbon */
+  .filmstrip { display: flex; gap: 8px; padding: 8px 24px; overflow-x: auto; flex-shrink: 0; min-height: 80px; align-items: flex-start; }
+  .filmstrip::-webkit-scrollbar { height: 4px; }
+  .filmstrip::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+  .thumb { flex-shrink: 0; width: 100px; cursor: pointer; border: 2px solid transparent; border-radius: 6px; overflow: hidden; transition: border-color 0.2s, transform 0.2s; background: #0f3460; }
+  .thumb:hover { border-color: #e94560; transform: scale(1.05); }
+  .thumb.selected { border-color: #e94560; }
+  .thumb-img { width: 100%; height: 56px; object-fit: cover; display: block; background: #111; }
+  .thumb .thumb-label { font-size: 10px; padding: 3px 6px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ccc; }
+
+  .display { flex: 1; padding: 0 24px 16px; display: flex; flex-direction: column; min-height: 0; }
+  .display-card { flex: 1; background: #16213e; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+  .display-header { padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1a2744; flex-shrink: 0; }
+  .display-header h3 { font-size: 14px; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+  .badge-complete { background: #4ade80; color: #000; }
+  .badge-running { background: #fbbf24; color: #000; animation: pulse 1.5s infinite; }
+  .badge-confirm { background: #60a5fa; color: #000; }
+  .display-body { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; overflow: hidden; padding: 12px; gap: 12px; }
+
+  /* Gallery for multi-pano stages */
+  .gallery { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; align-items: center; max-height: 100%; overflow-y: auto; }
+  .gallery-item { border-radius: 6px; overflow: hidden; background: #0a0a1a; cursor: pointer; transition: transform 0.2s; }
+  .gallery-item:hover { transform: scale(1.03); }
+  .gallery-item img, .gallery-item canvas { display: block; max-height: 280px; border-radius: 4px; }
+  .gallery-item .gallery-label { font-size: 11px; padding: 4px 8px; text-align: center; color: #aaa; }
+
+  /* Confirmation panel */
+  .confirm-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+  .confirm-canvas-wrap { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; }
+  .confirm-canvas-wrap canvas { max-width: 100%; max-height: 100%; border-radius: 4px; cursor: grab; }
+  .confirm-info { position: absolute; top: 12px; right: 12px; background: rgba(0,0,0,0.8); padding: 10px 14px; border-radius: 8px; font-size: 12px; max-width: 200px; }
+  .confirm-info img { width: 100%; border-radius: 4px; margin-top: 6px; }
+
+  .actions { padding: 10px 16px; display: flex; gap: 8px; border-top: 1px solid #1a2744; flex-shrink: 0; }
+  .btn { padding: 8px 20px; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500; }
+  .btn-primary { background: #e94560; color: #fff; }
+  .btn-secondary { background: #1a2744; color: #ccc; border: 1px solid #333; }
+  .btn:hover { opacity: 0.85; }
+
+  /* Progress overlay */
+  .progress-overlay { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.75); padding: 10px 16px; }
+  .progress-bar { height: 4px; background: #333; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+  .progress-fill { height: 100%; background: #e94560; border-radius: 2px; transition: width 0.3s; }
+  .progress-text { font-size: 11px; color: #aaa; }
+
+  /* 3D viewer placeholder */
+  .viewer-3d { width: 100%; height: 100%; background: #0a0a1a; border-radius: 4px; display: flex; align-items: center; justify-content: center; position: relative; }
+  .viewer-3d canvas { border-radius: 4px; }
+  .viewer-hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #666; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 4px; }
+
+  /* Demo controls */
+  .demo-controls { position: fixed; bottom: 12px; right: 12px; background: #16213e; border-radius: 8px; padding: 8px; display: flex; flex-wrap: wrap; gap: 4px; z-index: 100; border: 1px solid #333; max-width: 420px; }
+  .demo-btn { padding: 4px 8px; border: 1px solid #444; background: #1a2744; color: #ccc; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  .demo-btn:hover { background: #0f3460; }
+  .demo-btn.active { background: #e94560; color: #fff; border-color: #e94560; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <h2>Pipeline</h2>
+  <div id="stage-list"></div>
+</div>
+
+<div class="main">
+  <div class="header">
+    <h1 id="stage-title"></h1>
+    <p id="stage-desc"></p>
+  </div>
+  <div class="filmstrip" id="filmstrip"></div>
+  <div class="display">
+    <div class="display-card">
+      <div class="display-header">
+        <h3 id="display-title"></h3>
+        <span class="badge" id="display-badge"></span>
+      </div>
+      <div class="display-body" id="display-body"></div>
+      <div class="actions" id="actions" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<div class="demo-controls">
+  <button class="demo-btn" onclick="go(0)">0 Density</button>
+  <button class="demo-btn" onclick="go(1)">1 Segment</button>
+  <button class="demo-btn" onclick="go(2)">2 Polygons</button>
+  <button class="demo-btn" onclick="go(3)">3 PanoFoot</button>
+  <button class="demo-btn" onclick="go(4)">4 Match</button>
+  <button class="demo-btn" onclick="go(5)">5 Confirm</button>
+  <button class="demo-btn" onclick="go(6)">6 3DLines</button>
+  <button class="demo-btn" onclick="go(7)">7 2DFeats</button>
+  <button class="demo-btn" onclick="go(8)">8 Pose</button>
+  <button class="demo-btn" onclick="go(9)">9 Color</button>
+  <button class="demo-btn" onclick="go(10)">10 Mesh</button>
+  <button class="demo-btn" onclick="go(11)">11 Done</button>
+</div>
+
+<script>
+const stages = [
+  { id: "density_image",    name: "Density Image",        desc: "2D density projection from point cloud", viz: "density" },
+  { id: "sam3_segmentation",name: "Room Segmentation",    desc: "SAM3 room boundary detection",           viz: "segmentation" },
+  { id: "sam3_polygons",    name: "Mask to Polygons",     desc: "Converting masks to world-meter polygons",viz: "polygons" },
+  { id: "pano_footprints",  name: "Pano Footprints",      desc: "Room polygons from panoramic images",    viz: "pano_debug_gallery" },
+  { id: "polygon_matching", name: "Polygon Matching",     desc: "Fitting pano footprints into room slots", viz: "matching" },
+  { id: "confirm_matching", name: "Confirm Matching",     desc: "Verify pano-to-room assignments",        viz: "confirm" },
+  { id: "line_detection_3d",name: "3D Line Detection",    desc: "Detecting and clustering 3D line segments",viz: "obj_viewer" },
+  { id: "line_detection_2d",name: "2D Feature Extraction", desc: "Sphere-based line features from panoramas",viz: "grouped_lines_gallery" },
+  { id: "pose_estimation",  name: "Pose Estimation",      desc: "Multi-room camera localization",          viz: "topdown" },
+  { id: "colorization",     name: "Colorization",         desc: "Coloring point cloud from panoramas",    viz: "progress" },
+  { id: "meshing",          name: "Meshing",              desc: "Generating UV-textured GLB mesh",        viz: "progress" },
+  { id: "done",             name: "Complete",             desc: "Pipeline complete",                       viz: "final" },
+];
+
+const panos = ["TMB_corridor_south1", "TMB_corridor_south2", "TMB_office1"];
+let currentStage = 0;
+let selectedThumb = -1;
+
+// ── Drawing helpers ──
+
+function drawDensityImage(ctx, w, h) {
+  ctx.fillStyle = '#080808';
+  ctx.fillRect(0, 0, w, h);
+  ctx.save();
+  ctx.translate(w*0.1, h*0.15);
+  const s = Math.min(w*0.8, h*0.7);
+  ctx.scale(s/200, s/200);
+
+  // L-shape floor plan with density dots
+  ctx.fillStyle = '#2a4a2a';
+  ctx.beginPath();
+  ctx.moveTo(0,0); ctx.lineTo(200,0); ctx.lineTo(200,80);
+  ctx.lineTo(120,80); ctx.lineTo(120,200); ctx.lineTo(0,200); ctx.closePath();
+  ctx.fill();
+  for (let i = 0; i < 1200; i++) {
+    const x = Math.random()*200, y = Math.random()*200;
+    if ((y<80||x<120) && x<200 && y<200) {
+      const b = 30+Math.random()*50;
+      ctx.fillStyle = `rgb(${b*0.6},${b},${b*0.4})`;
+      ctx.fillRect(x,y,1.5,1.5);
+    }
+  }
+  ctx.strokeStyle = '#6a6'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0,0); ctx.lineTo(200,0); ctx.lineTo(200,80);
+  ctx.lineTo(120,80); ctx.lineTo(120,200); ctx.lineTo(0,200); ctx.closePath();
+  ctx.stroke();
+  // interior walls
+  ctx.strokeStyle = '#484'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(80,0); ctx.lineTo(80,80); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,100); ctx.lineTo(120,100); ctx.stroke();
+  ctx.restore();
+}
+
+function drawSegmentMasks(ctx, w, h) {
+  ctx.save();
+  ctx.translate(w*0.1, h*0.15);
+  const s = Math.min(w*0.8, h*0.7);
+  ctx.scale(s/200, s/200);
+  const rooms = [
+    { pts: [[0,0],[80,0],[80,80],[0,80]], color: 'rgba(255,80,80,0.4)', label: 'Room 1' },
+    { pts: [[80,0],[200,0],[200,80],[80,80]], color: 'rgba(80,120,255,0.4)', label: 'Room 2' },
+    { pts: [[0,80],[120,80],[120,200],[0,200]], color: 'rgba(80,255,120,0.4)', label: 'Corridor' },
+  ];
+  for (const r of rooms) {
+    ctx.fillStyle = r.color;
+    ctx.beginPath(); r.pts.forEach(([x,y],i) => i?ctx.lineTo(x,y):ctx.moveTo(x,y)); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = r.color.replace('0.4','0.9'); ctx.lineWidth = 2; ctx.stroke();
+    const cx = r.pts.reduce((a,p)=>a+p[0],0)/r.pts.length;
+    const cy = r.pts.reduce((a,p)=>a+p[1],0)/r.pts.length;
+    ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.fillText(r.label, cx, cy+4);
+  }
+  ctx.restore();
+}
+
+function drawPolygonOutlines(ctx, w, h) {
+  ctx.save();
+  ctx.translate(w*0.1, h*0.15);
+  const s = Math.min(w*0.8, h*0.7);
+  ctx.scale(s/200, s/200);
+  ctx.setLineDash([5,3]); ctx.lineWidth = 2.5;
+  ctx.strokeStyle = '#ff5050'; ctx.strokeRect(2,2,76,76);
+  ctx.strokeStyle = '#5078ff'; ctx.strokeRect(82,2,116,76);
+  ctx.strokeStyle = '#50ff78'; ctx.strokeRect(2,82,116,116);
+  ctx.setLineDash([]);
+  ctx.font = '9px sans-serif'; ctx.fillStyle = '#ff8'; ctx.textAlign = 'center';
+  ctx.fillText('4.2m', 40, -4); ctx.fillText('6.1m', 140, -4); ctx.fillText('3.8m', -10, 45);
+  ctx.restore();
+}
+
+function drawPanoDebug(ctx, w, h, panoName) {
+  // Mock SAM3 pano footprint debug.png
+  const grad = ctx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, '#2a3a5a'); grad.addColorStop(0.5, '#3a4a4a'); grad.addColorStop(1, '#2a2a3a');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
+  // Equirectangular pano mock
+  ctx.fillStyle = '#1a2a3a'; ctx.fillRect(w*0.02, h*0.05, w*0.96, h*0.45);
+  // Floor/ceiling masks
+  ctx.fillStyle = 'rgba(255,100,50,0.3)'; ctx.fillRect(w*0.02, h*0.35, w*0.96, h*0.15);
+  ctx.fillStyle = 'rgba(50,100,255,0.3)'; ctx.fillRect(w*0.02, h*0.05, w*0.96, h*0.1);
+  // Footprint polygon in XZ plane
+  ctx.strokeStyle = '#ff0'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  const cx = w*0.5, cy = h*0.75;
+  const pts = [[cx-50,cy-30],[cx+60,cy-25],[cx+55,cy+35],[cx-45,cy+40]];
+  pts.forEach(([x,y],i) => i?ctx.lineTo(x,y):ctx.moveTo(x,y));
+  ctx.closePath(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,0,0.15)'; ctx.fill();
+  // Camera dot
+  ctx.fillStyle = '#f00'; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI*2); ctx.fill();
+  // Label
+  ctx.font = 'bold 13px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.fillText(panoName, w*0.5, h*0.98);
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#aaa';
+  ctx.fillText('Floor/ceiling fusion → Manhattan polygon', w*0.5, h*0.55);
+}
+
+function drawMatchingResult(ctx, w, h) {
+  drawDensityImage(ctx, w, h);
+  ctx.save();
+  ctx.translate(w*0.1, h*0.15);
+  const s = Math.min(w*0.8, h*0.7);
+  ctx.scale(s/200, s/200);
+  // Room outlines
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(0,0,80,80); ctx.strokeRect(80,0,120,80); ctx.strokeRect(0,80,120,120);
+  // Matched pano footprints in their final positions
+  const matches = [
+    { name: 'Office', color: '#ff6', cx: 40, cy: 40, pts: [[-25,-20],[30,-18],[28,22],[-22,24]] },
+    { name: 'Cor. S1', color: '#6ff', cx: 60, cy: 120, pts: [[-35,-15],[40,-12],[38,18],[-32,20]] },
+    { name: 'Cor. S2', color: '#f6f', cx: 60, cy: 170, pts: [[-30,-12],[35,-10],[33,15],[-28,18]] },
+  ];
+  for (const m of matches) {
+    ctx.strokeStyle = m.color; ctx.lineWidth = 2; ctx.fillStyle = m.color.replace(')',',0.15)').replace('#','rgba(');
+    ctx.fillStyle = `${m.color}22`;
+    ctx.beginPath();
+    m.pts.forEach(([dx,dy],i) => i ? ctx.lineTo(m.cx+dx,m.cy+dy) : ctx.moveTo(m.cx+dx,m.cy+dy));
+    ctx.closePath(); ctx.stroke(); ctx.fill();
+    ctx.fillStyle = m.color; ctx.beginPath(); ctx.arc(m.cx, m.cy, 4, 0, Math.PI*2); ctx.fill();
+    ctx.font = 'bold 10px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.fillText(m.name, m.cx, m.cy - 8);
+  }
+  // IoU scores
+  ctx.font = '9px sans-serif'; ctx.fillStyle = '#4f4';
+  ctx.fillText('IoU 0.92', 40, 60); ctx.fillText('IoU 0.88', 60, 140); ctx.fillText('IoU 0.85', 60, 190);
+  ctx.restore();
+}
+
+function drawConfirmation(ctx, w, h) {
+  drawDensityImage(ctx, w, h);
+  ctx.save();
+  ctx.translate(w*0.1, h*0.15);
+  const s = Math.min(w*0.8, h*0.7);
+  ctx.scale(s/200, s/200);
+  // Room outlines with labels
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(0,0,80,80); ctx.strokeRect(80,0,120,80); ctx.strokeRect(0,80,120,120);
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#666'; ctx.textAlign = 'center';
+  ctx.fillText('Room 1', 40, 75); ctx.fillText('Room 2', 140, 75); ctx.fillText('Corridor', 60, 195);
+  // Draggable pano markers
+  const markers = [
+    { name: 'TMB_office1', color: '#ff6', x: 40, y: 40, room: 'Room 1' },
+    { name: 'TMB_corridor_south1', color: '#6ff', x: 60, y: 120, room: 'Corridor' },
+    { name: 'TMB_corridor_south2', color: '#f6f', x: 60, y: 170, room: 'Corridor' },
+  ];
+  for (const m of markers) {
+    // Marker circle with glow
+    ctx.shadowColor = m.color; ctx.shadowBlur = 8;
+    ctx.fillStyle = m.color; ctx.beginPath(); ctx.arc(m.x, m.y, 7, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Ring
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(m.x, m.y, 10, 0, Math.PI*2); ctx.stroke();
+    // Label
+    ctx.font = 'bold 9px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.fillText(m.name.replace('TMB_',''), m.x, m.y - 15);
+  }
+  // Instruction
+  ctx.restore();
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#aaa'; ctx.textAlign = 'center';
+  ctx.fillText('Click a marker to see panorama. Drag to reassign to a different room.', w*0.5, h - 8);
+}
+
+function draw3DLines(ctx, w, h) {
+  ctx.fillStyle = '#050510'; ctx.fillRect(0, 0, w, h);
+  ctx.save();
+  ctx.translate(w*0.1, h*0.1);
+  ctx.scale(w*0.8/200, h*0.8/200);
+  // Wireframe lines colored by principal direction
+  const groups = [
+    { color: '#ff4444', count: 80, dirX: ()=>(Math.random()-0.5)*3, dirY: ()=>(Math.random()-0.5)*3 },
+    { color: '#44ff44', count: 100, dirX: ()=>5+Math.random()*25, dirY: ()=>(Math.random()-0.5)*2 },
+    { color: '#4488ff', count: 90, dirX: ()=>(Math.random()-0.5)*2, dirY: ()=>5+Math.random()*25 },
+  ];
+  ctx.lineWidth = 1.2;
+  for (const g of groups) {
+    ctx.strokeStyle = g.color;
+    for (let i = 0; i < g.count; i++) {
+      const x = Math.random()*200, y = Math.random()*200;
+      if ((y<80||x<120) && x<200 && y<200) {
+        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+g.dirX(),y+g.dirY()); ctx.stroke();
+      }
+    }
+  }
+  ctx.restore();
+  // Legend
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = '#ff4444'; ctx.fillText('Vertical (Z)', 12, h-30);
+  ctx.fillStyle = '#44ff44'; ctx.fillText('Wall-X', 100, h-30);
+  ctx.fillStyle = '#4488ff'; ctx.fillText('Wall-Y', 160, h-30);
+  ctx.fillStyle = '#888'; ctx.font = '10px sans-serif';
+  ctx.fillText('1208 segments, 1137 intersections', 12, h-12);
+  // 3D hint
+  ctx.fillStyle = '#555'; ctx.textAlign = 'center';
+  ctx.fillText('🖱 Drag to rotate • Scroll to zoom', w*0.5, 16);
+}
+
+function drawGroupedLines(ctx, w, h, panoName) {
+  // Mock grouped_lines.png: panorama with direction-colored line segments
+  const grad = ctx.createLinearGradient(0, h*0.3, 0, h*0.7);
+  grad.addColorStop(0, '#4a5a6a'); grad.addColorStop(1, '#3a3a2a');
+  ctx.fillStyle = '#1a1a2a'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = grad; ctx.fillRect(0, h*0.1, w, h*0.75);
+  // Direction-colored lines
+  const colors = ['#ff4444', '#44ff44', '#4488ff'];
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < 80; i++) {
+    const x1 = Math.random()*w, y1 = h*0.1+Math.random()*h*0.75;
+    const angle = [0, Math.PI/2, Math.PI*0.25][Math.floor(Math.random()*3)] + (Math.random()-0.5)*0.3;
+    const len = 15+Math.random()*50;
+    ctx.strokeStyle = colors[Math.floor(Math.random()*3)];
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x1+Math.cos(angle)*len, y1+Math.sin(angle)*len); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.fillText(panoName, w*0.5, h*0.97);
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#aaa';
+  ctx.fillText('142 lines • 3 principal directions', w*0.5, h*0.06);
+}
+
+function drawTopdown(ctx, w, h) {
+  drawDensityImage(ctx, w, h);
+  ctx.save();
+  ctx.translate(w*0.1, h*0.15);
+  const s = Math.min(w*0.8, h*0.7);
+  ctx.scale(s/200, s/200);
+  // Camera markers with FOV cones
+  const cams = [
+    { name: 'office1', x: 40, y: 35, angle: 0.3, color: '#ff6' },
+    { name: 'cor_s1', x: 55, y: 125, angle: -0.2, color: '#6ff' },
+    { name: 'cor_s2', x: 55, y: 168, angle: 0.5, color: '#f6f' },
+  ];
+  for (const c of cams) {
+    // FOV cone
+    ctx.fillStyle = c.color + '18';
+    ctx.beginPath(); ctx.moveTo(c.x, c.y);
+    ctx.lineTo(c.x+Math.cos(c.angle-0.5)*35, c.y+Math.sin(c.angle-0.5)*35);
+    ctx.lineTo(c.x+Math.cos(c.angle+0.5)*35, c.y+Math.sin(c.angle+0.5)*35);
+    ctx.closePath(); ctx.fill();
+    // Marker
+    ctx.fillStyle = c.color; ctx.beginPath(); ctx.arc(c.x, c.y, 5, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(c.x, c.y, 5, 0, Math.PI*2); ctx.stroke();
+    ctx.font = 'bold 9px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.fillText(c.name, c.x, c.y - 10);
+  }
+  ctx.restore();
+  ctx.font = '11px sans-serif'; ctx.fillStyle = '#aaa'; ctx.textAlign = 'center';
+  ctx.fillText('Camera poses on density image (Voronoi-filtered)', w*0.5, h - 6);
+}
+
+function drawProgress(ctx, w, h, stageName) {
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#888'; ctx.textAlign = 'center';
+  ctx.fillText(`${stageName} in progress...`, w*0.5, h*0.4);
+  // Progress bar
+  ctx.fillStyle = '#222'; ctx.fillRect(w*0.2, h*0.5, w*0.6, 8);
+  ctx.fillStyle = '#e94560'; ctx.fillRect(w*0.2, h*0.5, w*0.6*0.65, 8);
+  ctx.fillStyle = '#aaa'; ctx.font = '11px sans-serif';
+  ctx.fillText('65% — Processing tiles...', w*0.5, h*0.58);
+  // Log lines
+  ctx.font = '10px monospace'; ctx.fillStyle = '#555'; ctx.textAlign = 'left';
+  const logs = ['[PROGRESS] 7 12 Merging tiles...', 'Tile 6/6 done (4.2s)', 'Poisson depth=8, voxel=10mm'];
+  logs.forEach((l, i) => ctx.fillText(l, w*0.15, h*0.65 + i*16));
+}
+
+// ── Rendering ──
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.style.maxWidth = '100%'; c.style.maxHeight = '100%'; c.style.borderRadius = '4px';
+  return c;
+}
+
+function renderViz(stageIdx, container) {
+  container.innerHTML = '';
+  const s = stages[stageIdx];
+
+  if (s.viz === 'density') {
+    const c = makeCanvas(500, 500); drawDensityImage(c.getContext('2d'), 500, 500);
+    container.appendChild(c);
+
+  } else if (s.viz === 'segmentation') {
+    const c = makeCanvas(500, 500); const ctx = c.getContext('2d');
+    drawDensityImage(ctx, 500, 500); drawSegmentMasks(ctx, 500, 500);
+    container.appendChild(c);
+
+  } else if (s.viz === 'polygons') {
+    const c = makeCanvas(500, 500); const ctx = c.getContext('2d');
+    drawDensityImage(ctx, 500, 500); drawSegmentMasks(ctx, 500, 500); drawPolygonOutlines(ctx, 500, 500);
+    container.appendChild(c);
+
+  } else if (s.viz === 'pano_debug_gallery') {
+    const gal = document.createElement('div'); gal.className = 'gallery';
+    for (const p of panos) {
+      const item = document.createElement('div'); item.className = 'gallery-item';
+      const c = makeCanvas(300, 250); drawPanoDebug(c.getContext('2d'), 300, 250, p);
+      c.style.maxHeight = '200px';
+      item.appendChild(c);
+      const lbl = document.createElement('div'); lbl.className = 'gallery-label'; lbl.textContent = p;
+      item.appendChild(lbl);
+      gal.appendChild(item);
+    }
+    container.appendChild(gal);
+
+  } else if (s.viz === 'matching') {
+    const c = makeCanvas(500, 500); drawMatchingResult(c.getContext('2d'), 500, 500);
+    container.appendChild(c);
+
+  } else if (s.viz === 'confirm') {
+    const wrap = document.createElement('div'); wrap.className = 'confirm-panel';
+    const cw = document.createElement('div'); cw.className = 'confirm-canvas-wrap';
+    const CW = 500, CH = 500;
+    const c = makeCanvas(CW, CH);
+    cw.appendChild(c);
+    wrap.appendChild(cw);
+    container.appendChild(wrap);
+
+    // Room zones for drop detection
+    const sc = Math.min(CW*0.8, CH*0.7)/200;
+    const ox = CW*0.1, oy = CH*0.15;
+    const rooms = [
+      { name: 'Room 1', x: ox, y: oy, w: 80*sc, h: 80*sc },
+      { name: 'Room 2', x: ox+80*sc, y: oy, w: 120*sc, h: 80*sc },
+      { name: 'Corridor', x: ox, y: oy+80*sc, w: 120*sc, h: 120*sc },
+    ];
+
+    // Draggable markers
+    const markers = [
+      { name: 'TMB_office1', room: 'Room 1', color: '#ff6',
+        px: ox+40*sc, py: oy+35*sc, imgSrc: '../data/pano/raw/TMB_office1.jpg' },
+      { name: 'TMB_corridor_south1', room: 'Corridor', color: '#6ff',
+        px: ox+55*sc, py: oy+120*sc, imgSrc: '../data/pano/raw/TMB_corridor_south1.jpg' },
+      { name: 'TMB_corridor_south2', room: 'Corridor', color: '#f6f',
+        px: ox+55*sc, py: oy+170*sc, imgSrc: '../data/pano/raw/TMB_corridor_south2.jpg' },
+    ];
+
+    let selectedMarker = null;
+    let dragging = null;
+    let dragOffsetX = 0, dragOffsetY = 0;
+
+    // Popup element (positioned absolutely over the canvas wrapper)
+    const popup = document.createElement('div');
+    popup.style.cssText = 'position:absolute;display:none;background:rgba(10,10,30,0.95);border:1px solid #444;border-radius:8px;padding:10px;width:180px;pointer-events:none;z-index:10;box-shadow:0 4px 20px rgba(0,0,0,0.5);';
+    cw.appendChild(popup);
+
+    function canvasToPage(cx, cy) {
+      const rect = c.getBoundingClientRect();
+      return { x: cx / CW * rect.width, y: cy / CH * rect.height };
+    }
+
+    function hitTest(mx, my) {
+      for (const m of markers) {
+        const dx = mx - m.px, dy = my - m.py;
+        if (dx*dx + dy*dy < 15*15) return m;
+      }
+      return null;
+    }
+
+    function roomAt(px, py) {
+      for (const r of rooms) {
+        if (px >= r.x && px <= r.x+r.w && py >= r.y && py <= r.y+r.h) return r.name;
+      }
+      return '(outside)';
+    }
+
+    function redraw() {
+      const ctx = c.getContext('2d');
+      // Draw base
+      drawDensityImage(ctx, CW, CH);
+      ctx.save();
+      ctx.translate(ox, oy); ctx.scale(sc, sc);
+      // Room outlines
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5/sc;
+      ctx.strokeRect(0,0,80,80); ctx.strokeRect(80,0,120,80); ctx.strokeRect(0,80,120,120);
+      ctx.font = `${10/sc}px sans-serif`; ctx.fillStyle = '#555'; ctx.textAlign = 'center';
+      ctx.fillText('Room 1', 40, 75); ctx.fillText('Room 2', 140, 75); ctx.fillText('Corridor', 60, 195);
+      ctx.restore();
+
+      // Draw markers
+      for (const m of markers) {
+        const isSel = m === selectedMarker;
+        const isDrag = m === dragging;
+        ctx.save();
+        // Glow
+        ctx.shadowColor = m.color; ctx.shadowBlur = isSel ? 15 : 8;
+        ctx.fillStyle = m.color;
+        ctx.beginPath(); ctx.arc(m.px, m.py, isSel ? 9 : 7, 0, Math.PI*2); ctx.fill();
+        ctx.shadowBlur = 0;
+        // Ring
+        ctx.strokeStyle = isSel ? '#fff' : 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = isSel ? 3 : 2;
+        if (isDrag) { ctx.setLineDash([4,3]); }
+        ctx.beginPath(); ctx.arc(m.px, m.py, isSel ? 12 : 10, 0, Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+        // Label
+        ctx.font = 'bold 10px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+        ctx.fillText(m.name.replace('TMB_',''), m.px, m.py - 16);
+        ctx.font = '8px sans-serif'; ctx.fillStyle = '#aaa';
+        ctx.fillText(m.room, m.px, m.py + 22);
+        ctx.restore();
+      }
+      // Instruction
+      ctx.font = '11px sans-serif'; ctx.fillStyle = '#666'; ctx.textAlign = 'center';
+      ctx.fillText('Click marker to inspect • Drag to reassign room', CW*0.5, CH - 6);
+    }
+
+    function showPopup(m) {
+      const pos = canvasToPage(m.px, m.py);
+      // Position popup to the right of the marker, or left if near edge
+      let left = pos.x + 20;
+      const rect = cw.getBoundingClientRect();
+      if (left + 180 > rect.width) left = pos.x - 200;
+      popup.style.left = left + 'px';
+      popup.style.top = Math.max(0, pos.y - 60) + 'px';
+      popup.style.display = 'block';
+      popup.style.borderColor = m.color;
+      popup.innerHTML =
+        `<div style="font-weight:600;color:${m.color};margin-bottom:4px">${m.name}</div>` +
+        `<div style="font-size:11px;color:#aaa;margin-bottom:6px">Assigned to: <strong style="color:#fff">${m.room}</strong></div>` +
+        `<img src="${m.imgSrc}" style="width:100%;height:70px;object-fit:cover;border-radius:4px" ` +
+        `onerror="this.outerHTML='<div style=\\'height:50px;background:#1a2744;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#555;font-size:10px\\'>No preview</div>'">`;
+    }
+
+    function hidePopup() { popup.style.display = 'none'; }
+
+    // Mouse events
+    function getCanvasPos(e) {
+      const rect = c.getBoundingClientRect();
+      return { x: (e.clientX - rect.left) / rect.width * CW, y: (e.clientY - rect.top) / rect.height * CH };
+    }
+
+    c.addEventListener('mousedown', function(e) {
+      const pos = getCanvasPos(e);
+      const hit = hitTest(pos.x, pos.y);
+      if (hit) {
+        dragging = hit;
+        dragOffsetX = pos.x - hit.px;
+        dragOffsetY = pos.y - hit.py;
+        selectedMarker = hit;
+        c.style.cursor = 'grabbing';
+        showPopup(hit);
+        redraw();
+      }
+    });
+
+    c.addEventListener('mousemove', function(e) {
+      const pos = getCanvasPos(e);
+      if (dragging) {
+        dragging.px = pos.x - dragOffsetX;
+        dragging.py = pos.y - dragOffsetY;
+        // Update room assignment based on position
+        dragging.room = roomAt(dragging.px, dragging.py);
+        showPopup(dragging);
+        redraw();
+      } else {
+        const hit = hitTest(pos.x, pos.y);
+        c.style.cursor = hit ? 'grab' : 'default';
+      }
+    });
+
+    c.addEventListener('mouseup', function() {
+      if (dragging) {
+        dragging.room = roomAt(dragging.px, dragging.py);
+        dragging = null;
+        c.style.cursor = 'grab';
+        redraw();
+      }
+    });
+
+    c.addEventListener('mouseleave', function() {
+      if (dragging) {
+        dragging = null;
+        c.style.cursor = 'default';
+        redraw();
+      }
+    });
+
+    c.addEventListener('click', function(e) {
+      if (dragging) return;
+      const pos = getCanvasPos(e);
+      const hit = hitTest(pos.x, pos.y);
+      if (hit) {
+        selectedMarker = hit;
+        showPopup(hit);
+      } else {
+        selectedMarker = null;
+        hidePopup();
+      }
+      redraw();
+    });
+
+    redraw();
+
+    // Actions
+    document.getElementById('actions').style.display = 'flex';
+    document.getElementById('actions').innerHTML = '<button class="btn btn-primary" onclick="go(6)">Confirm &amp; Continue</button><button class="btn btn-secondary">Re-run Matching</button>';
+
+  } else if (s.viz === 'obj_viewer') {
+    const wrap = document.createElement('div'); wrap.className = 'viewer-3d';
+    const c = makeCanvas(600, 500); draw3DLines(c.getContext('2d'), 600, 500);
+    wrap.appendChild(c);
+    const hint = document.createElement('div'); hint.className = 'viewer-hint';
+    hint.textContent = 'Interactive Three.js OBJ viewer — drag to rotate, scroll to zoom';
+    wrap.appendChild(hint);
+    container.appendChild(wrap);
+
+  } else if (s.viz === 'grouped_lines_gallery') {
+    const gal = document.createElement('div'); gal.className = 'gallery';
+    for (const p of panos) {
+      const item = document.createElement('div'); item.className = 'gallery-item';
+      const c = makeCanvas(320, 200); drawGroupedLines(c.getContext('2d'), 320, 200, p);
+      c.style.maxHeight = '200px';
+      item.appendChild(c);
+      const lbl = document.createElement('div'); lbl.className = 'gallery-label'; lbl.textContent = p;
+      item.appendChild(lbl);
+      gal.appendChild(item);
+    }
+    container.appendChild(gal);
+
+  } else if (s.viz === 'topdown') {
+    const c = makeCanvas(500, 500); drawTopdown(c.getContext('2d'), 500, 500);
+    container.appendChild(c);
+
+  } else if (s.viz === 'progress') {
+    const c = makeCanvas(600, 400); drawProgress(c.getContext('2d'), 600, 400, s.name);
+    container.appendChild(c);
+
+  } else if (s.viz === 'final') {
+    container.innerHTML = '<div style="text-align:center"><div style="font-size:48px;margin-bottom:12px">✅</div><div style="font-size:16px;color:#4ade80">Pipeline Complete</div><div style="font-size:12px;color:#888;margin-top:8px">GLB mesh ready for virtual tour</div><button class="btn btn-primary" style="margin-top:16px">Launch Virtual Tour</button></div>';
+  }
+}
+
+function renderThumb(stageIdx) {
+  const c = document.createElement('canvas'); c.width = 160; c.height = 90;
+  c.className = 'thumb-img';
+  const ctx = c.getContext('2d');
+  const s = stages[stageIdx];
+  if (s.viz === 'density') drawDensityImage(ctx, 160, 90);
+  else if (s.viz === 'segmentation') { drawDensityImage(ctx,160,90); drawSegmentMasks(ctx,160,90); }
+  else if (s.viz === 'polygons') { drawDensityImage(ctx,160,90); drawSegmentMasks(ctx,160,90); drawPolygonOutlines(ctx,160,90); }
+  else if (s.viz === 'pano_debug_gallery') drawPanoDebug(ctx, 160, 90, panos[0]);
+  else if (s.viz === 'matching') drawMatchingResult(ctx, 160, 90);
+  else if (s.viz === 'confirm') drawConfirmation(ctx, 160, 90);
+  else if (s.viz === 'obj_viewer') draw3DLines(ctx, 160, 90);
+  else if (s.viz === 'grouped_lines_gallery') drawGroupedLines(ctx, 160, 90, panos[0]);
+  else if (s.viz === 'topdown') drawTopdown(ctx, 160, 90);
+  else { ctx.fillStyle='#111'; ctx.fillRect(0,0,160,90); ctx.fillStyle='#444'; ctx.font='10px sans-serif'; ctx.textAlign='center'; ctx.fillText(s.name,80,50); }
+  return c;
+}
+
+function render(stageIdx) {
+  currentStage = stageIdx;
+  selectedThumb = -1;
+
+  // Sidebar
+  document.getElementById('stage-list').innerHTML = stages.map((s, i) => {
+    let dc = i < stageIdx ? 'complete' : i === stageIdx ? (s.viz==='confirm'?'confirm':'active-dot') : 'pending';
+    return `<div class="stage-item ${i===stageIdx?'active':''}" onclick="go(${i})"><span class="dot ${dc}"></span>${s.name}</div>`;
+  }).join('');
+
+  // Header
+  document.getElementById('stage-title').textContent = stages[stageIdx].name;
+  document.getElementById('stage-desc').textContent = stages[stageIdx].desc;
+
+  // Filmstrip
+  const fs = document.getElementById('filmstrip');
+  fs.innerHTML = '';
+  for (let i = 0; i < stageIdx; i++) {
+    const t = document.createElement('div'); t.className = 'thumb';
+    t.appendChild(renderThumb(i));
+    const lbl = document.createElement('div'); lbl.className = 'thumb-label'; lbl.textContent = stages[i].name;
+    t.appendChild(lbl);
+    const idx = i;
+    t.onclick = () => { selectedThumb = idx; showSelected(idx); };
+    fs.appendChild(t);
+  }
+
+  // Display
+  const badge = document.getElementById('display-badge');
+  document.getElementById('display-title').textContent = stages[stageIdx].name;
+  if (stages[stageIdx].viz === 'confirm') {
+    badge.textContent = 'Awaiting Confirmation'; badge.className = 'badge badge-confirm';
+  } else if (stageIdx < stages.length - 1) {
+    badge.textContent = 'Running...'; badge.className = 'badge badge-running';
+  } else {
+    badge.textContent = 'Complete'; badge.className = 'badge badge-complete';
+  }
+
+  if (stages[stageIdx].viz !== 'confirm') {
+    document.getElementById('actions').style.display = 'none';
+  }
+
+  renderViz(stageIdx, document.getElementById('display-body'));
+
+  // Demo buttons
+  document.querySelectorAll('.demo-btn').forEach((b, i) => b.className = 'demo-btn' + (i===stageIdx?' active':''));
+}
+
+function showSelected(idx) {
+  document.getElementById('display-title').textContent = stages[idx].name;
+  const badge = document.getElementById('display-badge');
+  badge.textContent = 'Complete'; badge.className = 'badge badge-complete';
+  document.getElementById('actions').style.display = 'none';
+  renderViz(idx, document.getElementById('display-body'));
+  document.querySelectorAll('.thumb').forEach((t, i) => t.className = 'thumb' + (i===idx?' selected':''));
+}
+
+function go(i) { render(i); }
+
+render(5); // Start at Confirm Matching to show a rich filmstrip
+</script>
+</body>
+</html>

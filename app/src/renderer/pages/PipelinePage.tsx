@@ -53,7 +53,7 @@ export default function PipelinePage() {
           return next;
         });
 
-        // Load thumbnail for filmstrip (first image)
+        // Load thumbnail for filmstrip (first image, or placeholder for 3D stages)
         const imgs = result.artifacts.images;
         if (imgs && imgs.length > 0) {
           try {
@@ -68,6 +68,14 @@ export default function PipelinePage() {
           } catch {
             // thumbnail load failed, skip
           }
+        } else if (result.artifacts.objPath || result.artifacts.plyPath || result.artifacts.glbPath) {
+          // 3D stages (OBJ/PLY/GLB) have no raster thumbnail -- use a sentinel
+          // value so the filmstrip knows the stage has artifacts
+          setFilmstripThumbs((prev) => {
+            const next = new Map(prev);
+            next.set(stageId, "__3d__");
+            return next;
+          });
         }
       }
     } catch {
@@ -86,10 +94,12 @@ export default function PipelinePage() {
         }
       }
     });
-    // Also resolve for the current stage if it's a confirmation gate (no script to run)
+    // Also resolve for the current stage if it has no scripts to run
+    // (confirmation gates and the "done" stage)
     if (
-      currentStageConfig?.viewType === "confirmation" &&
+      currentStageConfig &&
       currentStatus === "pending" &&
+      (currentStageConfig.viewType === "confirmation" || currentStageConfig.scriptPaths.length === 0) &&
       !resolvedStagesRef.current.has(currentStageConfig.id)
     ) {
       resolvedStagesRef.current.add(currentStageConfig.id);
@@ -157,9 +167,13 @@ export default function PipelinePage() {
     glbPath: project.outputs.meshGlb,
   };
 
-  // Provide resolved artifacts for completed stages and confirmation gates
+  // Provide resolved artifacts for completed stages, confirmation gates, and no-script stages (done)
   const displayResolvedArtifacts =
-    displayStageConfig && (displayStatus === "complete" || displayStageConfig.viewType === "confirmation")
+    displayStageConfig && (
+      displayStatus === "complete" ||
+      displayStageConfig.viewType === "confirmation" ||
+      displayStageConfig.scriptPaths.length === 0
+    )
       ? resolvedMap.get(displayStageConfig.id)
       : undefined;
 
@@ -225,24 +239,16 @@ export default function PipelinePage() {
           onConfirm={confirm}
           onRetry={retry}
           onBack={() => navigate("/")}
+          onLaunchTour={async (glbPath) => {
+            // Find minimap PNG near GLB, then launch Unity
+            let minimapPath: string | undefined;
+            try {
+              const result = await window.electronAPI.findMinimapPng(glbPath) as { found: boolean; path?: string };
+              if (result.found && result.path) minimapPath = result.path;
+            } catch { /* no minimap, that's ok */ }
+            window.electronAPI.launchUnity(glbPath, minimapPath);
+          }}
         />
-
-        {/* Launch Tour button on final stage */}
-        {currentStageConfig?.id === "done" && currentStatus === "complete" && project.outputs.meshGlb && (
-          <div style={{ padding: 16, textAlign: "center", borderTop: "1px solid var(--bg-card)" }}>
-            <button
-              className="btn btn--primary"
-              onClick={() =>
-                window.electronAPI.launchUnity(
-                  project.outputs.meshGlb!,
-                  project.outputs.densityImage
-                )
-              }
-            >
-              Launch Virtual Tour
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );

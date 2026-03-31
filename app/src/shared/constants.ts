@@ -133,7 +133,7 @@ export const FULL_PIPELINE_STAGES: StageConfig[] = [
     id: "meshing",
     name: "Meshing",
     description: "Generating UV-textured GLB mesh",
-    scriptPaths: ["src/meshing/mesh_reconstruction.py"],
+    scriptPaths: ["src/meshing/mesh_pipeline.py"],
     condaEnv: "scan_env",
     viewType: "progress",
     perPano: false,

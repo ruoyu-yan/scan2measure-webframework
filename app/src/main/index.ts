@@ -54,9 +54,24 @@ function createWindow() {
 
 app.whenReady().then(() => {
   // Handle local-file:// protocol to serve local files to renderer
-  protocol.handle("local-file", (request) => {
-    const filePath = decodeURIComponent(request.url.replace("local-file://", ""));
-    return net.fetch("file://" + filePath);
+  protocol.handle("local-file", async (request) => {
+    // Standard-scheme URL parsing may absorb the leading path component as a host
+    // (e.g. local-file:///home/... → host="home", pathname="/...").
+    // Reconstruct the absolute path from host + pathname to preserve the leading /.
+    const parsed = new URL(request.url);
+    const filePath = decodeURIComponent(
+      (parsed.host ? "/" + parsed.host : "") + parsed.pathname
+    );
+    logInfo("protocol", `local-file request: ${request.url} -> ${filePath}`);
+    try {
+      return await net.fetch("file://" + filePath);
+    } catch (err) {
+      logError("protocol", `local-file fetch failed for "${filePath}": ${(err as Error).message}`);
+      return new Response(`Failed to load local file: ${filePath}`, {
+        status: 404,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
   });
   createWindow();
 });
@@ -178,7 +193,7 @@ ipcMain.handle(
       line_detection_2d: "",                      // uses pano_name override per invocation
       pose_estimation: "",                        // uses precomputed data
       colorization: pcPath,                       // point cloud + panos
-      meshing: texturedPlyDir,                    // textured point cloud -> GLB
+      meshing: pcPath,                              // raw point cloud -> PoissonRecon + texrecon -> GLB
     };
 
     const config: Record<string, unknown> = {
@@ -194,6 +209,9 @@ ipcMain.handle(
       input_path: stageInputPath[stageId] || "",
       sam3_segmentation_dir: sam3SegDir,
       pose_estimates_dir: poseEstimatesDir,
+      panorama_dir: path.join(PROJECT_ROOT, "data", "pano", "raw"),
+      pose_json_path: path.join(poseEstimatesDir, "local_filter_results.json"),
+      output_dir: pcName ? path.join(PROJECT_ROOT, "data", "mesh", pcName) : "",
       ...overrides,
     };
 
@@ -332,10 +350,22 @@ ipcMain.handle(
         const densityImg = path.join(
           PROJECT_ROOT, "data", "density_image", pcName, `${pcName}.png`
         );
+        const polygonOverlayImg = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, `${pcName}_polygon_overlay.png`
+        );
         const polygonsJson = path.join(
           PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, `${pcName}_polygons.json`
         );
-        if (fs.existsSync(densityImg)) artifacts.densityImage = densityImg;
+        if (fs.existsSync(densityImg)) {
+          artifacts.densityImage = densityImg;
+        }
+        // Use polygon overlay for filmstrip thumbnail (shows polygons on density image)
+        // Falls back to raw density image if overlay not yet generated
+        if (fs.existsSync(polygonOverlayImg)) {
+          artifacts.images = [polygonOverlayImg];
+        } else if (fs.existsSync(densityImg)) {
+          artifacts.images = [densityImg];
+        }
         if (fs.existsSync(polygonsJson)) artifacts.polygonsJson = polygonsJson;
         break;
       }
@@ -368,8 +398,12 @@ ipcMain.handle(
         const alignJson = path.join(
           PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, "demo6_alignment.json"
         );
+        const polyJson = path.join(
+          PROJECT_ROOT, "data", "sam3_room_segmentation", pcName, `${pcName}_polygons.json`
+        );
         if (fs.existsSync(densityImg)) artifacts.densityImage = densityImg;
         if (fs.existsSync(alignJson)) artifacts.alignmentJson = alignJson;
+        if (fs.existsSync(polyJson)) artifacts.polygonsJson = polyJson;
         const panoThumbnails: Record<string, string> = {};
         for (const pn of panoNames) {
           const thumbPath = path.join(PROJECT_ROOT, "data", "pano", "raw", `${pn}.jpg`);
@@ -381,10 +415,15 @@ ipcMain.handle(
         break;
       }
       case "line_detection_3d": {
-        const objFile = path.join(
+        // Prefer clustered OBJ (direction-colored via MTL) over raw lines OBJ
+        const clusteredObj = path.join(
+          PROJECT_ROOT, "data", "debug_renderer", pcName, "clustered_lines.obj"
+        );
+        const rawObj = path.join(
           PROJECT_ROOT, "data", "debug_renderer", pcName, `${pcName}_lines.obj`
         );
-        if (fs.existsSync(objFile)) artifacts.objPath = objFile;
+        if (fs.existsSync(clusteredObj)) artifacts.objPath = clusteredObj;
+        else if (fs.existsSync(rawObj)) artifacts.objPath = rawObj;
         break;
       }
       case "line_detection_2d": {
@@ -415,7 +454,30 @@ ipcMain.handle(
         const texturedPly = path.join(
           PROJECT_ROOT, "data", "textured_point_cloud", pcName, `${pcName}_textured.ply`
         );
+        logInfo("ipc", `artifacts:resolve ${stageId} plyPath candidate: ${texturedPly} (exists=${fs.existsSync(texturedPly)})`);
         if (fs.existsSync(texturedPly)) artifacts.plyPath = texturedPly;
+        break;
+      }
+      case "meshing":
+      case "done": {
+        // Prefer texrecon GLB (mvs-texturing pipeline), fall back to base name GLB (legacy)
+        const meshDir = path.join(PROJECT_ROOT, "data", "mesh", pcName);
+        const texreconGlb = path.join(meshDir, `${pcName}_texrecon.glb`);
+        const baseGlb = path.join(meshDir, `${pcName}.glb`);
+        if (fs.existsSync(texreconGlb)) {
+          artifacts.glbPath = texreconGlb;
+        } else if (fs.existsSync(baseGlb)) {
+          artifacts.glbPath = baseGlb;
+        } else {
+          // Search for any GLB in the mesh directory
+          try {
+            const files = fs.readdirSync(meshDir).filter((f: string) => f.endsWith(".glb"));
+            if (files.length > 0) artifacts.glbPath = path.join(meshDir, files[0]);
+          } catch { /* meshDir may not exist yet */ }
+        }
+        if (artifacts.glbPath) {
+          logInfo("ipc", `artifacts:resolve ${stageId} glbPath: ${artifacts.glbPath}`);
+        }
         break;
       }
       default:

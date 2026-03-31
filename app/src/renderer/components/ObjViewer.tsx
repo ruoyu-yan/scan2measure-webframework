@@ -6,24 +6,70 @@ interface ObjViewerProps {
   objPath: string;
 }
 
+/** Material color map matching cluster_3d_lines.py output. */
+const MATERIAL_COLORS: Record<string, [number, number, number]> = {
+  group_0: [1.0, 0.0, 0.0],      // Red   — Vertical (Z)
+  group_1: [0.0, 1.0, 0.0],      // Green — Wall-X
+  group_2: [0.0, 0.0, 1.0],      // Blue  — Wall-Y
+  unclassified: [0.5, 0.5, 0.5], // Gray
+};
+const DEFAULT_COLOR: [number, number, number] = [0.0, 1.0, 0.8]; // cyan fallback
+
 /**
  * Parse an OBJ file containing colored line segments from 3DLineDetection.
- * Format: v x y z r g b / l v1 v2
+ * Supports two color modes:
+ *   1. Vertex colors: v x y z r g b
+ *   2. MTL materials: usemtl group_0 / group_1 / group_2 / unclassified
  */
 function parseObjLines(text: string) {
-  const vertices: number[] = [];
-  const colors: number[] = [];
-  const indices: number[] = [];
+  const positions: number[] = [];
+  const vertexColors: ([number, number, number] | null)[] = [];
+  const lineIndices: [number, number][] = [];
+  const lineMaterials: string[] = [];
+  let currentMaterial = "";
+
   for (const line of text.split('\n')) {
     const parts = line.trim().split(/\s+/);
-    if (parts[0] === 'v' && parts.length >= 7) {
-      vertices.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
-      colors.push(parseFloat(parts[4]), parseFloat(parts[5]), parseFloat(parts[6]));
+    if (parts[0] === 'v' && parts.length >= 4) {
+      positions.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+      if (parts.length >= 7) {
+        vertexColors.push([parseFloat(parts[4]), parseFloat(parts[5]), parseFloat(parts[6])]);
+      } else {
+        vertexColors.push(null);
+      }
+    } else if (parts[0] === 'usemtl') {
+      currentMaterial = parts[1] || "";
     } else if (parts[0] === 'l' && parts.length >= 3) {
-      indices.push(parseInt(parts[1]) - 1, parseInt(parts[2]) - 1); // OBJ is 1-indexed
+      lineIndices.push([parseInt(parts[1]) - 1, parseInt(parts[2]) - 1]);
+      lineMaterials.push(currentMaterial);
     }
   }
-  return { vertices, colors, indices };
+
+  // Build color array: material colors from line segments, overridden by explicit vertex colors
+  const colors = new Float32Array(positions.length); // same length, 3 per vertex
+  // Apply material colors based on which line segment references each vertex
+  for (let i = 0; i < lineIndices.length; i++) {
+    const [v1, v2] = lineIndices[i];
+    const col = MATERIAL_COLORS[lineMaterials[i]] || DEFAULT_COLOR;
+    colors[v1 * 3] = col[0]; colors[v1 * 3 + 1] = col[1]; colors[v1 * 3 + 2] = col[2];
+    colors[v2 * 3] = col[0]; colors[v2 * 3 + 1] = col[1]; colors[v2 * 3 + 2] = col[2];
+  }
+  // Override with explicit vertex colors if present (v x y z r g b)
+  for (let i = 0; i < vertexColors.length; i++) {
+    const vc = vertexColors[i];
+    if (vc) { colors[i * 3] = vc[0]; colors[i * 3 + 1] = vc[1]; colors[i * 3 + 2] = vc[2]; }
+  }
+  // Any vertex not assigned by either method gets default color
+  for (let i = 0; i < vertexColors.length; i++) {
+    if (!vertexColors[i] && colors[i * 3] === 0 && colors[i * 3 + 1] === 0 && colors[i * 3 + 2] === 0) {
+      colors[i * 3] = DEFAULT_COLOR[0]; colors[i * 3 + 1] = DEFAULT_COLOR[1]; colors[i * 3 + 2] = DEFAULT_COLOR[2];
+    }
+  }
+
+  const indices: number[] = [];
+  for (const [v1, v2] of lineIndices) { indices.push(v1, v2); }
+
+  return { vertices: positions, colors: Array.from(colors), indices };
 }
 
 export default function ObjViewer({ objPath }: ObjViewerProps) {

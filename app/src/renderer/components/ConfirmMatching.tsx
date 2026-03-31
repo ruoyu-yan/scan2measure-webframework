@@ -7,6 +7,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 interface ConfirmMatchingProps {
   densityImagePath: string;
   alignmentJsonPath: string;
+  polygonsJsonPath?: string;  // path to <pcName>_polygons.json with room polygon data
   panoThumbnails: Record<string, string>; // panoName -> absolute file path
   onConfirm: () => void;
   onCorrect?: (correctedAlignment: unknown) => void;
@@ -31,6 +32,19 @@ interface AlignmentMatch {
 interface RoomEntry {
   polygon: number[][]; // [[x,y], ...]
   label: string;
+}
+
+/** Room entry from the separate polygons JSON file (<pcName>_polygons.json). */
+interface PolygonsJsonRoom {
+  label: string;
+  vertices_world_meters: number[][]; // [[x,y], ...]
+  mask_index?: number;
+  [key: string]: unknown;
+}
+
+interface PolygonsJsonData {
+  rooms: PolygonsJsonRoom[];
+  [key: string]: unknown;
 }
 
 /** Top-level alignment JSON structure (flexible). */
@@ -65,11 +79,26 @@ const COLORS = [
   "#ff6", "#6ff", "#f6f", "#6f6", "#f96", "#69f", "#f66", "#6f9",
 ];
 
-const MARKER_RADIUS = 8;
-const MARKER_RADIUS_SELECTED = 10;
-const RING_WIDTH = 2;
-const RING_WIDTH_SELECTED = 3;
-const HIT_RADIUS = 16;
+/** High-resolution internal canvas size (replaces the old 256x256 density image). */
+const CANVAS_RES = 1024;
+
+const MARKER_RADIUS = 24;
+const MARKER_RADIUS_SELECTED = 30;
+const RING_WIDTH = 6;
+const RING_WIDTH_SELECTED = 8;
+const HIT_RADIUS = 48;
+
+/** Distinct pastel/muted fill colors for room polygons (background). */
+const ROOM_FILLS = [
+  "rgba(100,149,237,0.30)",  // cornflower blue
+  "rgba(144,238,144,0.30)",  // light green
+  "rgba(255,182,193,0.30)",  // light pink
+  "rgba(255,218,125,0.30)",  // warm yellow
+  "rgba(186,152,255,0.30)",  // lavender
+  "rgba(127,219,199,0.30)",  // teal
+  "rgba(255,160,122,0.30)",  // light salmon
+  "rgba(176,196,222,0.30)",  // light steel blue
+];
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
@@ -102,12 +131,16 @@ function shortName(name: string): string {
 
 export default function ConfirmMatching(props: ConfirmMatchingProps) {
   const {
-    densityImagePath,
+    // densityImagePath is accepted for backward compatibility but no longer used;
+    // room polygons are rendered programmatically at high resolution instead.
+    densityImagePath: _densityImagePath,
     alignmentJsonPath,
+    polygonsJsonPath,
     panoThumbnails,
     onConfirm,
     onCorrect,
   } = props;
+  void _densityImagePath; // suppress unused-variable warning
 
   // Refs
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -116,8 +149,8 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
   // Data loading state
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [densityImg, setDensityImg] = useState<HTMLImageElement | null>(null);
   const [alignment, setAlignment] = useState<AlignmentData | null>(null);
+  const [polygonsData, setPolygonsData] = useState<PolygonsJsonData | null>(null);
 
   // Marker state
   const [markers, setMarkers] = useState<MarkerState[]>([]);
@@ -138,10 +171,10 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
     w: 800,
     h: 600,
   });
-  // Image natural size
-  const [imgNatural, setImgNatural] = useState<{ w: number; h: number }>({
-    w: 256,
-    h: 256,
+  // Internal canvas resolution (high-res, replaces old density-image size)
+  const [imgNatural] = useState<{ w: number; h: number }>({
+    w: CANVAS_RES,
+    h: CANVAS_RES,
   });
 
   // Room polygons in image-pixel space (for hit-testing & drawing)
@@ -162,37 +195,6 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
   const imgToWorldRef = useRef<(ix: number, iy: number) => { x: number; y: number }>(
     (ix, iy) => ({ x: ix, y: iy })
   );
-
-  // -----------------------------------------------------------------------
-  // Load density image
-  // -----------------------------------------------------------------------
-  useEffect(() => {
-    if (!densityImagePath) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const b64: string = await (window as any).electronAPI.readImage(
-          densityImagePath
-        );
-        if (cancelled) return;
-        const img = new Image();
-        img.onload = () => {
-          if (cancelled) return;
-          setDensityImg(img);
-          setImgNatural({ w: img.naturalWidth, h: img.naturalHeight });
-        };
-        img.onerror = () => {
-          if (!cancelled) setError("Failed to decode density image");
-        };
-        img.src = b64;
-      } catch {
-        if (!cancelled) setError("Failed to load density image");
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [densityImagePath]);
 
   // -----------------------------------------------------------------------
   // Load alignment JSON via readImage IPC (returns base64 of any file)
@@ -221,15 +223,42 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
   }, [alignmentJsonPath]);
 
   // -----------------------------------------------------------------------
-  // Once both image and alignment are loaded, build coordinate transforms
-  // and initialise markers.
+  // Load separate polygons JSON (room boundaries in world-meter coords)
   // -----------------------------------------------------------------------
   useEffect(() => {
-    if (!densityImg || !alignment) return;
+    if (!polygonsJsonPath) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const b64: string = await (window as any).electronAPI.readImage(
+          polygonsJsonPath
+        );
+        if (cancelled) return;
+        const commaIdx = b64.indexOf(",");
+        const jsonText = atob(b64.substring(commaIdx + 1));
+        const data: PolygonsJsonData = JSON.parse(jsonText);
+        if (cancelled) return;
+        setPolygonsData(data);
+      } catch {
+        // Polygons JSON is optional; don't set error state
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [polygonsJsonPath]);
+
+  // -----------------------------------------------------------------------
+  // Once alignment is loaded, build coordinate transforms and initialise
+  // markers.  Also re-runs when polygonsData arrives so room boundaries
+  // are included in the bounding box and drawn on the canvas.
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    if (!alignment) return;
     setLoading(false);
 
-    const imgW = densityImg.naturalWidth;
-    const imgH = densityImg.naturalHeight;
+    const imgW = CANVAS_RES;
+    const imgH = CANVAS_RES;
 
     // Gather all world-space points to determine bounding box
     const worldPts: number[][] = [];
@@ -241,6 +270,12 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
     if (alignment.rooms) {
       for (const r of alignment.rooms) {
         if (r.polygon) worldPts.push(...r.polygon);
+      }
+    }
+    // Include room polygon vertices from the separate polygons JSON
+    if (polygonsData?.rooms) {
+      for (const r of polygonsData.rooms) {
+        if (r.vertices_world_meters) worldPts.push(...r.vertices_world_meters);
       }
     }
 
@@ -293,9 +328,27 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
     worldToImgRef.current = worldToImg;
     imgToWorldRef.current = imgToWorld;
 
-    // Build room polygons in image-pixel space
+    // Build room polygons in image-pixel space.
+    // Priority: 1) separate polygons JSON (vertices_world_meters)
+    //           2) alignment.rooms (embedded in alignment JSON)
+    //           3) per-match room_polygon fields
     const roomPolys: { label: string; polygon: number[][] }[] = [];
-    if (alignment.rooms) {
+
+    // Source 1: separate polygons JSON (<pcName>_polygons.json)
+    if (polygonsData?.rooms) {
+      for (const r of polygonsData.rooms) {
+        if (!r.vertices_world_meters || r.vertices_world_meters.length < 3) continue;
+        roomPolys.push({
+          label: r.label,
+          polygon: r.vertices_world_meters.map(([wx, wy]) => {
+            const p = worldToImg(wx, wy);
+            return [p.x, p.y];
+          }),
+        });
+      }
+    }
+    // Source 2: alignment.rooms (if embedded in alignment JSON)
+    if (roomPolys.length === 0 && alignment.rooms) {
       for (const r of alignment.rooms) {
         if (!r.polygon || r.polygon.length < 3) continue;
         roomPolys.push({
@@ -307,7 +360,7 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
         });
       }
     }
-    // Fallback: extract per-room polygons from match entries
+    // Source 3: per-match room_polygon fields
     if (roomPolys.length === 0) {
       const seen = new Set<number>();
       for (const m of alignment.matches) {
@@ -339,7 +392,7 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
     setMarkers(newMarkers);
     setSelectedIdx(null);
     setDraggingIdx(null);
-  }, [densityImg, alignment]);
+  }, [alignment, polygonsData]);
 
   // -----------------------------------------------------------------------
   // Resize observer: keep canvas fitted to container with image aspect ratio
@@ -398,39 +451,39 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Internal resolution matches image for crisp rendering
+    // Internal resolution: high-res for crisp rendering
     canvas.width = imgNatural.w;
     canvas.height = imgNatural.h;
 
-    // Background
+    // Dark background
     ctx.fillStyle = "#0a0a1a";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Density image
-    if (densityImg) {
-      ctx.drawImage(densityImg, 0, 0, imgNatural.w, imgNatural.h);
-    }
-
-    // Room polygon outlines
-    for (const room of roomPolygonsCanvas) {
+    // ----- Room polygons as filled background shapes (replaces density image) -----
+    for (let ri = 0; ri < roomPolygonsCanvas.length; ri++) {
+      const room = roomPolygonsCanvas[ri];
       if (room.polygon.length < 3) continue;
+
+      // Filled room shape with distinct pastel color
       ctx.beginPath();
       ctx.moveTo(room.polygon[0][0], room.polygon[0][1]);
       for (let i = 1; i < room.polygon.length; i++) {
         ctx.lineTo(room.polygon[i][0], room.polygon[i][1]);
       }
       ctx.closePath();
-      ctx.fillStyle = "rgba(255,255,255,0.04)";
+      ctx.fillStyle = ROOM_FILLS[ri % ROOM_FILLS.length];
       ctx.fill();
-      ctx.strokeStyle = "rgba(255,255,255,0.3)";
-      ctx.lineWidth = 1.5;
+
+      // Crisp outline
+      ctx.strokeStyle = "rgba(255,255,255,0.45)";
+      ctx.lineWidth = 3;
       ctx.stroke();
 
       // Room label at centroid
       const centX = room.polygon.reduce((s, p) => s + p[0], 0) / room.polygon.length;
       const centY = room.polygon.reduce((s, p) => s + p[1], 0) / room.polygon.length;
-      ctx.font = "bold 8px sans-serif";
-      ctx.fillStyle = "rgba(255,255,255,0.35)";
+      ctx.font = "bold 24px sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.45)";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(room.label, centX, centY);
@@ -452,8 +505,8 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
       ctx.fillStyle = color + "1a";
       ctx.fill();
       ctx.strokeStyle = color + "88";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 3;
+      ctx.setLineDash([12, 8]);
       ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -471,7 +524,7 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
 
       // Glow
       ctx.shadowColor = color;
-      ctx.shadowBlur = isSel ? 16 : 10;
+      ctx.shadowBlur = isSel ? 48 : 30;
 
       // Filled circle
       ctx.fillStyle = color;
@@ -484,53 +537,53 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
       // White ring
       ctx.strokeStyle = isSel ? "#fff" : "rgba(255,255,255,0.7)";
       ctx.lineWidth = ringW;
-      if (isDrag) ctx.setLineDash([4, 3]);
+      if (isDrag) ctx.setLineDash([12, 8]);
       ctx.beginPath();
-      ctx.arc(m.cx, m.cy, r + ringW + 1, 0, Math.PI * 2);
+      ctx.arc(m.cx, m.cy, r + ringW + 3, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
 
       // Dashed highlight circle around selected (when not dragging)
       if (isSel && !isDrag) {
         ctx.strokeStyle = color + "88";
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 8]);
         ctx.beginPath();
-        ctx.arc(m.cx, m.cy, r + 8, 0, Math.PI * 2);
+        ctx.arc(m.cx, m.cy, r + 24, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
       }
 
       // Short label above
-      ctx.font = "bold 9px sans-serif";
+      ctx.font = "bold 28px sans-serif";
       ctx.fillStyle = "#fff";
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
       ctx.shadowColor = "#000";
-      ctx.shadowBlur = 3;
-      ctx.fillText(shortName(m.match.pano_name), m.cx, m.cy - r - 6);
+      ctx.shadowBlur = 8;
+      ctx.fillText(shortName(m.match.pano_name), m.cx, m.cy - r - 18);
 
       // Room assignment below
-      ctx.font = "7px sans-serif";
+      ctx.font = "22px sans-serif";
       ctx.fillStyle = "#aaa";
       ctx.textBaseline = "top";
       ctx.shadowBlur = 0;
-      ctx.fillText(m.roomLabel, m.cx, m.cy + r + 8);
+      ctx.fillText(m.roomLabel, m.cx, m.cy + r + 24);
 
       ctx.restore();
     }
 
     // Instruction text at bottom
-    ctx.font = "9px sans-serif";
+    ctx.font = "28px sans-serif";
     ctx.fillStyle = "#555";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
     ctx.fillText(
       "Click marker to inspect  \u2022  Drag to reassign room",
       imgNatural.w / 2,
-      imgNatural.h - 4
+      imgNatural.h - 12
     );
-  }, [densityImg, imgNatural, roomPolygonsCanvas, markers, selectedIdx, draggingIdx]);
+  }, [imgNatural, roomPolygonsCanvas, markers, selectedIdx, draggingIdx]);
 
   // Redraw whenever relevant state changes
   useEffect(() => { redraw(); }, [redraw]);
@@ -702,12 +755,18 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
     const canvasOX = canvasRect.left - wrapperRect.left;
     const canvasOY = canvasRect.top - wrapperRect.top;
 
-    const popupW = 200;
+    const popupW = 380;
     let left = canvasOX + markerSX + 20;
     if (left + popupW > wrapperRect.width) {
       left = canvasOX + markerSX - popupW - 20;
     }
-    const top = Math.max(4, canvasOY + markerSY - 60);
+    // Clamp top so popup stays within canvas bounds
+    const popupEstH = 280;
+    let top = canvasOY + markerSY - 60;
+    if (top + popupEstH > canvasOY + canvasRect.height) {
+      top = canvasOY + canvasRect.height - popupEstH - 8;
+    }
+    top = Math.max(4, top);
 
     return {
       position: "absolute",
@@ -718,7 +777,7 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
       background: "rgba(10,10,30,0.95)",
       border: `1px solid ${COLORS[marker.colorIndex]}`,
       borderRadius: "8px",
-      padding: "10px 12px",
+      padding: "12px 16px",
       boxShadow: "0 4px 20px rgba(0,0,0,0.6)",
       pointerEvents: "none" as const,
     };
@@ -790,16 +849,16 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
               fontWeight: 600,
               color: COLORS[selMarker.colorIndex],
               marginBottom: 4,
-              fontSize: 13,
+              fontSize: 14,
             }}>
               {selMarker.match.pano_name}
             </div>
-            <div style={{ fontSize: 11, color: "#aaa", marginBottom: 6 }}>
+            <div style={{ fontSize: 12, color: "#aaa", marginBottom: 6 }}>
               Assigned to:{" "}
               <strong style={{ color: "#fff" }}>{selMarker.roomLabel}</strong>
             </div>
             {selMarker.match.score != null && (
-              <div style={{ fontSize: 10, color: "#777", marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>
                 Score: {selMarker.match.score.toFixed(3)}
               </div>
             )}
@@ -809,21 +868,21 @@ export default function ConfirmMatching(props: ConfirmMatchingProps) {
                 alt={selMarker.match.pano_name}
                 style={{
                   width: "100%",
-                  height: 70,
+                  height: 160,
                   objectFit: "cover",
                   borderRadius: 4,
                 }}
               />
             ) : (
               <div style={{
-                height: 50,
+                height: 80,
                 background: "#1a2744",
                 borderRadius: 4,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 color: "#555",
-                fontSize: 10,
+                fontSize: 11,
               }}>
                 No preview
               </div>
