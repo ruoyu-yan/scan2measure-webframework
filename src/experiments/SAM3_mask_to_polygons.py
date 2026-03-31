@@ -99,6 +99,70 @@ def extract_polygon_from_mask(mask_img):
 
 
 # ---------------------------------------------------------
+# POLYGON OVERLAY IMAGE
+# ---------------------------------------------------------
+# Colors matching the PolygonViewer React component
+ROOM_COLORS_HEX = [
+    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
+    "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990",
+]
+
+
+def _hex_to_bgr(hex_color):
+    """Convert '#RRGGBB' to (B, G, R) tuple for OpenCV."""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    return (b, g, r)
+
+
+def generate_polygon_overlay(density_img, rooms, output_path):
+    """Draw polygon outlines on the density image and save as PNG.
+
+    Produces an image that visually matches the PolygonViewer component:
+    semi-transparent colored fills + solid colored outlines + room labels.
+    """
+    # Convert grayscale density image to BGR for color drawing
+    if len(density_img.shape) == 2:
+        overlay = cv2.cvtColor(density_img, cv2.COLOR_GRAY2BGR)
+    else:
+        overlay = density_img.copy()
+
+    for i, room in enumerate(rooms):
+        verts = room.get("vertices_pixel")
+        if not verts or len(verts) < 3:
+            continue
+        color_hex = ROOM_COLORS_HEX[i % len(ROOM_COLORS_HEX)]
+        color_bgr = _hex_to_bgr(color_hex)
+        pts = np.array(verts, dtype=np.int32).reshape(-1, 1, 2)
+
+        # Semi-transparent fill (~19% opacity, matching PolygonViewer's "30" hex alpha)
+        fill_layer = overlay.copy()
+        cv2.fillPoly(fill_layer, [pts], color_bgr)
+        cv2.addWeighted(fill_layer, 0.19, overlay, 0.81, 0, overlay)
+
+        # Solid outline
+        cv2.polylines(overlay, [pts], isClosed=True, color=color_bgr, thickness=2)
+
+        # Room label at centroid
+        cx = int(np.mean([v[0] for v in verts]))
+        cy = int(np.mean([v[1] for v in verts]))
+        label = room.get("label", f"room_{i:02d}")
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        # Black shadow
+        cv2.putText(overlay, label, (cx - 1, cy + 1), font, font_scale,
+                    (0, 0, 0), thickness + 1, cv2.LINE_AA)
+        # Colored text
+        cv2.putText(overlay, label, (cx, cy), font, font_scale,
+                    color_bgr, thickness, cv2.LINE_AA)
+
+    cv2.imwrite(str(output_path), overlay)
+    print(f"  Saved polygon overlay: {output_path.name}")
+
+
+# ---------------------------------------------------------
 # MASK CLASSIFICATION
 # ---------------------------------------------------------
 def classify_masks(mask_images, density_img):
@@ -315,6 +379,10 @@ def main():
         json.dump(output, f, indent=4)
 
     print(f"\nSaved {len(rooms)} room polygons to {output_path}")
+
+    # Generate polygon overlay image for filmstrip thumbnail
+    polygon_overlay_path = mask_dir / f"{map_name}_polygon_overlay.png"
+    generate_polygon_overlay(density_img, rooms, polygon_overlay_path)
 
 
 if __name__ == "__main__":
