@@ -6,7 +6,7 @@ export interface ProjectRecord {
   id: string;
   name: string;
   created: string;
-  type: "full_pipeline" | "mesh_only" | "tour_only";
+  type: "full_pipeline" | "tour_only";
   status: "pending" | "in_progress" | "completed" | "error";
   inputs: {
     pointCloud?: string;

@@ -30,12 +30,11 @@ declare global {
 }
 
 interface FileUploadDialogProps {
-  mode: "full_pipeline" | "mesh_only";
   onSubmit: (data: { plyPath: string; panoramas?: string[]; projectName: string }) => void;
   onCancel: () => void;
 }
 
-export default function FileUploadDialog({ mode, onSubmit, onCancel }: FileUploadDialogProps) {
+export default function FileUploadDialog({ onSubmit, onCancel }: FileUploadDialogProps) {
   const [plyPath, setPlyPath] = useState<string | null>(null);
   const [panoramas, setPanoramas] = useState<string[]>([]);
   const [projectName, setProjectName] = useState("");
@@ -67,7 +66,7 @@ export default function FileUploadDialog({ mode, onSubmit, onCancel }: FileUploa
       setError("Please select a PLY file.");
       return;
     }
-    if (mode === "full_pipeline" && panoramas.length === 0) {
+    if (panoramas.length === 0) {
       setError("Please select at least one panoramic image.");
       return;
     }
@@ -77,7 +76,7 @@ export default function FileUploadDialog({ mode, onSubmit, onCancel }: FileUploa
     }
     onSubmit({
       plyPath,
-      panoramas: mode === "full_pipeline" ? panoramas : undefined,
+      panoramas,
       projectName: projectName.trim(),
     });
   };
@@ -85,7 +84,7 @@ export default function FileUploadDialog({ mode, onSubmit, onCancel }: FileUploa
   return (
     <div className="file-upload-overlay">
       <div className="file-upload-dialog">
-        <h2>{mode === "full_pipeline" ? "Full Pipeline" : "Mesh Only"}</h2>
+        <h2>Full Pipeline</h2>
 
         <div className="file-upload-field">
           <label>Project Name</label>
@@ -104,23 +103,21 @@ export default function FileUploadDialog({ mode, onSubmit, onCancel }: FileUploa
           </button>
         </div>
 
-        {mode === "full_pipeline" && (
-          <div className="file-upload-field">
-            <label>Panoramic Images</label>
-            <button className="file-upload-btn" onClick={handleSelectPanoramas}>
-              {panoramas.length > 0
-                ? `${panoramas.length} image(s) selected`
-                : "Select panoramas..."}
-            </button>
-            {panoramas.length > 0 && (
-              <ul className="file-upload-filelist">
-                {panoramas.map((p) => (
-                  <li key={p}>{p.split(/[/\\]/).pop()}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
+        <div className="file-upload-field">
+          <label>Panoramic Images</label>
+          <button className="file-upload-btn" onClick={handleSelectPanoramas}>
+            {panoramas.length > 0
+              ? `${panoramas.length} image(s) selected`
+              : "Select panoramas..."}
+          </button>
+          {panoramas.length > 0 && (
+            <ul className="file-upload-filelist">
+              {panoramas.map((p) => (
+                <li key={p}>{p.split(/[/\\]/).pop()}</li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         {error && <p className="file-upload-error">{error}</p>}
 

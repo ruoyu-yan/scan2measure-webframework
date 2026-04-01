@@ -7,6 +7,13 @@ files:
   - dist/**/*
   - node_modules/**/*
   - package.json
+asar: true
+linux:
+  target: AppImage
+  icon: assets/icons
+  category: Science
+appImage:
+  artifactName: "scan2measure.AppImage"
 win:
   target: dir
   icon: assets/icons/icon.ico

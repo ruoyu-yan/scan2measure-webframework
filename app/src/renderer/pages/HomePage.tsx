@@ -6,19 +6,16 @@ import FileUploadDialog from "../components/FileUploadDialog";
 import type { Project } from "../types/project";
 import "../styles/home.css";
 
-type DialogMode = "full_pipeline" | "mesh_only" | null;
-
 export default function HomePage() {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
-  const [dialogMode, setDialogMode] = useState<DialogMode>(null);
+  const [showDialog, setShowDialog] = useState(false);
 
   useEffect(() => {
     window.electronAPI.getProjects().then((list) => setProjects(list as Project[]));
   }, []);
 
-  const handleFullPipeline = () => setDialogMode("full_pipeline");
-  const handleMeshOnly = () => setDialogMode("mesh_only");
+  const handleFullPipeline = () => setShowDialog(true);
   const handleTourOnly = () => navigate("/tour-only");
 
   const handleFileSubmit = async (data: {
@@ -28,14 +25,14 @@ export default function HomePage() {
   }) => {
     const project = await window.electronAPI.createProject({
       name: data.projectName,
-      type: dialogMode as string,
+      type: "full_pipeline",
       inputs: {
         pointCloud: data.plyPath,
         panoramas: data.panoramas,
       },
       qualityTier: "balanced",
     });
-    setDialogMode(null);
+    setShowDialog(false);
     navigate(`/pipeline/${(project as Project).id}`);
   };
 
@@ -56,12 +53,6 @@ export default function HomePage() {
           onClick={handleFullPipeline}
         />
         <EntryCard
-          title="Mesh Only"
-          description="Already-colored PLY. Meshes and previews, then launches virtual tour."
-          icon="[M]"
-          onClick={handleMeshOnly}
-        />
-        <EntryCard
           title="Tour Only"
           description="Existing GLB mesh. Launches Unity virtual tour directly."
           icon="[T]"
@@ -71,11 +62,10 @@ export default function HomePage() {
 
       <RecentProjects projects={projects} />
 
-      {dialogMode && (
+      {showDialog && (
         <FileUploadDialog
-          mode={dialogMode}
           onSubmit={handleFileSubmit}
-          onCancel={() => setDialogMode(null)}
+          onCancel={() => setShowDialog(false)}
         />
       )}
     </div>

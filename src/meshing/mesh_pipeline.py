@@ -324,6 +324,7 @@ def run_texrecon(scene_dir, mesh_ply, out_prefix, labeling_path=None):
     if labeling_path and labeling_path.exists():
         cmd.append(f"--labeling_file={labeling_path}")
         cmd.append("--skip_local_seam_leveling")
+        cmd.append("--skip_global_seam_leveling")
         log("Running texrecon with pre-computed labeling...")
     else:
         cmd.extend(["--skip_geometric_visibility_test",

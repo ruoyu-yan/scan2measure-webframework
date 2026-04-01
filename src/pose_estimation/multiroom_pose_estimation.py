@@ -41,7 +41,7 @@ from pose_search import (
     xdf_coarse_search_from_precomputed,
 )
 from pose_refine import refine_pose
-from visualize_pose import render_side_by_side, render_reprojection, render_topdown
+from visualize_pose import render_side_by_side, render_reprojection, render_topdown, render_topdown_composite
 from line_analysis import classify_lines
 
 # -- Config ------------------------------------------------------------------
@@ -563,6 +563,24 @@ def main():
 
         dt_pano = time.time() - t_pano
         print(f"\n    Pano {pano_name} total: {dt_pano:.1f}s")
+
+    # ================================================================
+    # Composite top-down visualization (all cameras on one image)
+    # ================================================================
+    if use_local and density_img is not None:
+        cameras = []
+        for pn in pano_names:
+            r = all_results[pn]
+            cameras.append({
+                'name': pn,
+                't': np.array(r['t']),
+                'R': np.array(r['R']),
+            })
+        composite = render_topdown_composite(
+            density_img, density_meta, cameras, room_polygons=room_polygons)
+        composite_path = output_base / "composite_topdown.png"
+        cv2.imwrite(str(composite_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+        print(f"\nSaved composite topdown: {composite_path}")
 
     # ================================================================
     # Output: local_filter_results.json

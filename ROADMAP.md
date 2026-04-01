@@ -94,7 +94,7 @@ Key improvements over original FGPL: 642 XDF query points (vs 12), rotation dive
 
 ## Phase 4: Meshing 🟡
 
-**Status**: mvs-texturing integrated and texture quality confirmed good. Geometry pipeline needs tiled Poisson and double-sided face fix.
+**Status**: mvs-texturing integrated and texture quality confirmed good. Double-sided GLB materials implemented. Quality tiers (preview/balanced/high) adjust Poisson depth (8/10/11). Tiled Poisson not yet integrated.
 
 ### 4.1 Current: mvs-texturing Pipeline 🟡
 
@@ -105,8 +105,8 @@ Key improvements over original FGPL: 642 XDF query points (vs 12), rotation dive
 **What works**: texrecon produces good texture quality (mean brightness 160 vs 106, saturation 20.8 vs 4.6 compared to Open3D approach). Confirmed good in Unity.
 
 **Remaining:**
-- [ ] **Tiled Poisson reconstruction** — Current whole-cloud Poisson at depth 7 is too coarse (~23cm/cell). Need to use existing tiled parallel pipeline from `mesh_utils.py` (6x6m tiles, 1m overlap) so depth 8 gives ~4.7cm/cell.
-- [ ] **Wall single-side visibility** — Poisson produces single-sided faces. Unity backface culling makes walls only visible from one direction. Fix: double-sided material in GLB export or reverse triangle winding.
+- [ ] **Tiled Poisson reconstruction** — Current whole-cloud monolithic Poisson is used. Tiled parallel pipeline exists in `mesh_utils.py` (6x6m tiles, 1m overlap) but is not integrated into `mesh_pipeline.py`. Quality tiers (preview depth 8, balanced depth 10, high depth 11) partially mitigate this.
+- [x] **Wall double-sided materials** — `mesh_pipeline.py` sets `doubleSided = True` on GLB PBR materials for both textured and untextured paths.
 
 ### 4.2 Legacy: Vertex-Color Pipeline
 
@@ -123,7 +123,7 @@ Key improvements over original FGPL: 642 XDF query points (vs 12), rotation dive
 
 ## Phase 5: End-to-End Desktop App 🟡
 
-**Status**: Code implemented. Electron → Unity "Tour Only" integration tested. Pipeline stages 0-9 execute successfully. Stages 10-12 (meshing + done) pending.
+**Status**: Code implemented. Electron → Unity "Tour Only" integration tested. Pipeline stages 0-9 execute successfully. Stages 10-12 wired with correct visualization and scripts but pending end-to-end testing.
 
 ### 5.1 Python Script Modifications ✅
 
@@ -136,10 +136,11 @@ Pipeline hub with React UI: home screen (3 entry cards + recent projects), pipel
 **Tested**: Stages 0-9 (density image through colorization) run successfully via `conda run`. Per-stage visualization components working (8 new React components: Filmstrip, ImageViewer, ImageGallery, PolygonViewer, ConfirmMatching, ObjViewer, PlyViewer, RunningOverlay).
 
 **Remaining:**
-- [ ] Debug ConfirmMatching visualization (coordinate transforms, marker drag)
-- [ ] Test stages 10-12 (meshing + done) end-to-end
-- [ ] Verify confirm_colorization gate passes quality tier to meshing stage
-- [ ] Stage icons, Vite production build
+- [x] ConfirmMatching visualization — Coordinate transforms (world↔image via bounding box + uniform scale) and marker drag (mousedown/move/up with ray-cast room assignment) fully implemented in `ConfirmMatching.tsx` (977 lines).
+- [x] Quality tier flow — UI dropdown in `StageCanvas.tsx` → `usePipeline.ts` state → config JSON → `mesh_pipeline.py` quality presets. Complete bidirectional wiring verified.
+- [ ] Test stages 10-12 (meshing + done) end-to-end — Stages are wired in `constants.ts` and `StageCanvas.tsx` (stage 10: colored PLY viewer + quality tier selector; stage 11: progress panel; stage 12: GLB viewer + "Launch Virtual Tour" button) but not yet run with real data.
+- [ ] Stage icons — Currently Unicode status symbols only (✓/●/○/!/?) in `StageSidebar.tsx`. No SVG icons; `app/assets/icons/` is empty.
+- [ ] Vite production build — `npm run electron:build` script exists but `electron-builder.yml` only outputs `dir` format (no installer), app icon `assets/icons/icon.ico` missing, no cross-platform targets.
 - [ ] Polygon matching performance (~3.5 min for 3 panos due to `differential_evolution`)
 
 ### 5.3 Unity Virtual Tour ✅
@@ -149,7 +150,7 @@ First-person viewer: GLB runtime loading (GLTFast), WASD + fly/noclip mode, meas
 ### 5.4 Integration ✅ (partial)
 
 - Tour Only flow: Electron → Unity with GLB + camera pose. Tested 2026-03-30.
-- Full pipeline: Stages 0-9 pass. Stages 10-12 untested.
+- Full pipeline: Stages 0-9 pass. Stages 10-12 wired but untested with real data.
 
 ---
 
@@ -160,15 +161,12 @@ First-person viewer: GLB runtime loading (GLTFast), WASD + fly/noclip mode, meas
 | 1 | ✅ | Room-level pano assignment (SAM3-to-SAM3 jigsaw matching) |
 | 2 | ✅ | Camera pose estimation (FGPL-faithful, single + multi-room, Voronoi filtering) |
 | 3 | ✅ | Point cloud coloring (equirectangular projection + IDW blending) |
-| 4 | 🟡 | Meshing (mvs-texturing integrated, needs tiled Poisson + double-sided faces) |
-| 5 | 🟡 | Desktop app (Electron stages 0-9 tested, Unity tour working, stages 10-12 pending) |
+| 4 | 🟡 | Meshing (mvs-texturing integrated, double-sided GLB done, tiled Poisson not yet integrated) |
+| 5 | 🟡 | Desktop app (Electron stages 0-12 wired, Unity tour working, stages 10-12 need E2E testing) |
 
 ## Next Steps
 
-1. **Finish mvs-texturing pipeline** (Phase 4) — tiled Poisson reconstruction + double-sided wall fix.
-2. **Test pipeline stages 10-12** (Phase 5) — meshing + done stages end-to-end via Electron.
-3. **Debug ConfirmMatching visualization** (Phase 5) — coordinate transforms from `demo6_alignment.json` to canvas pixels.
-4. **Polygon matching performance** — `differential_evolution` takes ~3.5 min for 3 panos. Consider progress output or faster optimizer.
+1. **Write master's thesis manuscript** — Follow structure spec at `docs/superpowers/specs/2026-04-01-thesis-manuscript-structure-design.md`. KIT Word template (serifen), English, ~40 pages. 9 chapters: Introduction, Related Work, Pipeline Overview, Multi-Room Assignment, Camera Pose Estimation, Colorization & Meshing, Desktop App & Virtual Tour, Evaluation, Conclusion & Future Work.
 
 ## Dependencies Between Phases
 

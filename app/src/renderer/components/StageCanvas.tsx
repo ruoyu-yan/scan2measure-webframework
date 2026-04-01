@@ -8,6 +8,7 @@ import ConfirmMatching from "./ConfirmMatching";
 import ObjViewer from "./ObjViewer";
 import PolygonViewer from "./PolygonViewer";
 import PlyViewer from "./PlyViewer";
+import ProgressPanel from "./ProgressPanel";
 import type { StageProgress, StageStatus } from "../types/pipeline";
 
 /** Resolved artifact data for the current stage (from artifacts:resolve IPC). */
@@ -235,8 +236,26 @@ function renderContent(props: StageCanvasProps) {
     );
   }
 
-  // -- Active stage: show PREVIOUS stage's visualization with running overlay --
+  // -- Active stage --
   if (stageStatus === "active") {
+    // Progress-type stages (meshing, colorization): show centered progress panel
+    if (viewType === "progress") {
+      return (
+        <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ width: "100%", maxWidth: 640, padding: "0 24px" }}>
+            <div style={{ textAlign: "center", marginBottom: 24 }}>
+              <div className="running-spinner" style={{ width: 48, height: 48, margin: "0 auto 16px", borderWidth: 4 }} />
+              <div style={{ color: "#e2e8f0", fontSize: 18, fontWeight: 600 }}>{props.stageName}</div>
+              <div style={{ color: "#60a5fa", fontSize: 24, fontWeight: 600, marginTop: 4 }}>
+                {formatElapsed(props.elapsedMs)}
+              </div>
+            </div>
+            <ProgressPanel progress={props.progress} logLines={props.logLines} />
+          </div>
+        </div>
+      );
+    }
+    // Other viewTypes: show previous stage's visualization with running overlay
     if (prevStageId && prevResolvedArtifacts) {
       const prevViz = renderStageVisualization(prevStageId, prevResolvedArtifacts);
       if (prevViz) {

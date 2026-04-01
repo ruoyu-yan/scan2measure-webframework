@@ -6,7 +6,7 @@ import type { ResolvedArtifacts } from "../components/StageCanvas";
 import Filmstrip from "../components/Filmstrip";
 import { useProject } from "../hooks/useProject";
 import { usePipeline } from "../hooks/usePipeline";
-import { FULL_PIPELINE_STAGES, MESH_ONLY_STAGES } from "../../shared/constants";
+import { FULL_PIPELINE_STAGES } from "../../shared/constants";
 import type { StageStatus } from "../types/pipeline";
 import "../styles/pipeline.css";
 
@@ -15,9 +15,7 @@ export default function PipelinePage() {
   const navigate = useNavigate();
   const { project, loading, updateProject } = useProject(projectId);
 
-  // Determine which stage list to use based on project type
-  const stages =
-    project?.type === "mesh_only" ? MESH_ONLY_STAGES : FULL_PIPELINE_STAGES;
+  const stages = FULL_PIPELINE_STAGES;
 
   const { state, runCurrentStage, retry, confirm, setQualityTier } = usePipeline({
     stages,

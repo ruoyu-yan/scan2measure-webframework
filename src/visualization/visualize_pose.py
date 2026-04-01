@@ -277,6 +277,114 @@ def render_topdown(density_img, density_meta, camera_t, camera_R,
 
 
 # ============================================================
+# Composite top-down view (all cameras on one image)
+# ============================================================
+
+# Distinct colors per camera (up to 8)
+_CAMERA_COLORS = [
+    "#e63946",  # red
+    "#2a9d8f",  # teal
+    "#e9c46a",  # gold
+    "#264653",  # dark blue
+    "#f4a261",  # orange
+    "#6a4c93",  # purple
+    "#1d3557",  # navy
+    "#457b9d",  # steel blue
+]
+
+
+def render_topdown_composite(density_img, density_meta, cameras, room_polygons=None,
+                             resolution=800):
+    """All camera positions + headings overlaid on a single density image.
+
+    Args:
+        density_img: (H, W) uint8 grayscale density image
+        density_meta: dict from metadata.json
+        cameras: list of dicts with keys 'name', 't' (3,), 'R' (3,3)
+        room_polygons: list of (K, 2) arrays — polygon vertices in density pixel coords
+        resolution: output image height
+
+    Returns:
+        (H, W, 3) uint8 RGB image
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    img_w = density_meta["image_width"]
+    img_h = density_meta["image_height"]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
+    ax.imshow(density_img, cmap="gray", origin="upper")
+
+    # RoomFormer polygons
+    if room_polygons is not None:
+        for poly in room_polygons:
+            poly_arr = np.array(poly)
+            poly_closed = np.vstack([poly_arr, poly_arr[0:1]])
+            ax.plot(poly_closed[:, 0], poly_closed[:, 1], "-", color="lime",
+                    linewidth=2, alpha=0.8)
+            ax.fill(poly_arr[:, 0], poly_arr[:, 1], alpha=0.1, color="lime")
+
+    legend_elements = [
+        mpatches.Patch(facecolor="gray", edgecolor="gray", label="Density map"),
+        plt.Line2D([0], [0], color="lime", lw=2, label="Room polygon"),
+    ]
+
+    for i, cam in enumerate(cameras):
+        color = _CAMERA_COLORS[i % len(_CAMERA_COLORS)]
+        camera_t = np.asarray(cam['t'])
+        camera_R = np.asarray(cam['R'])
+
+        cx, cy = _world_to_density_pixel(camera_t, density_meta)
+
+        # Camera forward direction
+        forward_world = camera_R.T @ np.array([1.0, 0.0, 0.0])
+        rot = np.array(density_meta["rotation_matrix"])
+        min_coords = np.array(density_meta["min_coords"])
+        max_dim = density_meta["max_dim"]
+        fwd_rot = rot @ forward_world
+        if np.max(np.abs(min_coords)) > 500:
+            fwd_rot = fwd_rot * 1000.0
+        fwd_2d = np.array([fwd_rot[0], fwd_rot[1]])
+        fwd_len = np.linalg.norm(fwd_2d)
+        if fwd_len > 1e-6:
+            fwd_2d = fwd_2d / fwd_len
+        arrow_scale = 20.0
+        dx = fwd_2d[0] / max_dim * (img_w - 1) * arrow_scale
+        dy = fwd_2d[1] / max_dim * (img_h - 1) * arrow_scale
+
+        ax.plot(cx, cy, "o", color=color, markersize=12,
+                markeredgecolor="white", markeredgewidth=2, zorder=10)
+        ax.annotate("", xy=(cx + dx, cy + dy), xytext=(cx, cy),
+                    arrowprops=dict(arrowstyle="->", color=color, lw=2.5),
+                    zorder=11)
+        # Label near the dot
+        ax.text(cx + 8, cy - 8, cam['name'], fontsize=8, color=color,
+                fontweight="bold", zorder=12,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7, ec="none"))
+
+        legend_elements.append(
+            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=color,
+                       markersize=8, label=cam['name'])
+        )
+
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=9,
+              framealpha=0.8)
+    ax.set_title("All Camera Poses on Density Map", fontsize=13)
+    ax.set_xlim(0, img_w)
+    ax.set_ylim(img_h, 0)
+    ax.axis("off")
+
+    fig.canvas.draw()
+    buf = fig.canvas.buffer_rgba()
+    img = np.asarray(buf)[:, :, :3].copy()
+    plt.close(fig)
+    return img
+
+
+# ============================================================
 # Standalone entry point
 # ============================================================
 

@@ -1,4 +1,4 @@
-export type ProjectType = "full_pipeline" | "mesh_only" | "tour_only";
+export type ProjectType = "full_pipeline" | "tour_only";
 export type ProjectStatus = "pending" | "in_progress" | "completed" | "error";
 
 export interface ProjectInputs {

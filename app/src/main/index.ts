@@ -7,8 +7,29 @@ import { ProjectStore } from "./project-store";
 import { launchUnity } from "./unity-launcher";
 import { initLogger, logInfo, logError, closeLogger, getLogPath } from "./logger";
 
-// Project root is two levels up from app/dist/main/
-const PROJECT_ROOT = path.resolve(__dirname, "../../..");
+/**
+ * Resolve the monorepo root directory.
+ * - Packaged (AppImage): derive from process.env.APPIMAGE path
+ * - Packaged (other):    fall back to SCAN2MEASURE_ROOT env var
+ * - Development:         walk up from __dirname (app/dist/main/)
+ */
+function resolveProjectRoot(): string {
+  if (app.isPackaged) {
+    const appImagePath = process.env.APPIMAGE;
+    if (appImagePath) {
+      // e.g. <repo>/app/release/scan2measure.AppImage → 2 dirs up = repo root
+      return path.resolve(path.dirname(appImagePath), "../..");
+    }
+    if (process.env.SCAN2MEASURE_ROOT) {
+      return process.env.SCAN2MEASURE_ROOT;
+    }
+    return path.resolve(path.dirname(process.execPath), "../..");
+  }
+  // Dev mode: __dirname = app/dist/main/ → ../../.. = repo root
+  return path.resolve(__dirname, "../../..");
+}
+
+const PROJECT_ROOT = resolveProjectRoot();
 
 let mainWindow: BrowserWindow | null = null;
 let pipelineEngine: PipelineEngine | null = null;
@@ -16,6 +37,13 @@ let projectStore: ProjectStore;
 
 initLogger(PROJECT_ROOT);
 logInfo("app", `Project root: ${PROJECT_ROOT}`);
+logInfo("app", `app.isPackaged: ${app.isPackaged}`);
+if (process.env.APPIMAGE) {
+  logInfo("app", `APPIMAGE: ${process.env.APPIMAGE}`);
+}
+if (!fs.existsSync(path.join(PROJECT_ROOT, "src"))) {
+  logError("app", `PROJECT_ROOT validation failed: ${path.join(PROJECT_ROOT, "src")} does not exist`);
+}
 
 // Register custom protocol for serving local files to the renderer
 protocol.registerSchemesAsPrivileged([
@@ -41,7 +69,7 @@ function createWindow() {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    mainWindow.loadFile(path.join(__dirname, "../index.html"));
   }
 
   mainWindow.on("closed", () => {
@@ -439,14 +467,22 @@ ipcMain.handle(
         break;
       }
       case "pose_estimation": {
-        const imgs = filterExisting(
-          panoNames.map((pn: string) =>
-            path.join(
-              PROJECT_ROOT, "data", "pose_estimates", "multiroom", pn, "vis", "topdown.png"
-            )
-          )
+        // Prefer composite (all cameras on one image) over per-pano gallery
+        const composite = path.join(
+          PROJECT_ROOT, "data", "pose_estimates", "multiroom", "composite_topdown.png"
         );
-        if (imgs.length > 0) artifacts.images = imgs;
+        if (fs.existsSync(composite)) {
+          artifacts.images = [composite];
+        } else {
+          const imgs = filterExisting(
+            panoNames.map((pn: string) =>
+              path.join(
+                PROJECT_ROOT, "data", "pose_estimates", "multiroom", pn, "vis", "topdown.png"
+              )
+            )
+          );
+          if (imgs.length > 0) artifacts.images = imgs;
+        }
         break;
       }
       case "colorization":
@@ -460,11 +496,14 @@ ipcMain.handle(
       }
       case "meshing":
       case "done": {
-        // Prefer texrecon GLB (mvs-texturing pipeline), fall back to base name GLB (legacy)
+        // Prefer _textured GLB (mesh_pipeline.py), then legacy _texrecon / base name
         const meshDir = path.join(PROJECT_ROOT, "data", "mesh", pcName);
+        const texturedGlb = path.join(meshDir, `${pcName}_textured.glb`);
         const texreconGlb = path.join(meshDir, `${pcName}_texrecon.glb`);
         const baseGlb = path.join(meshDir, `${pcName}.glb`);
-        if (fs.existsSync(texreconGlb)) {
+        if (fs.existsSync(texturedGlb)) {
+          artifacts.glbPath = texturedGlb;
+        } else if (fs.existsSync(texreconGlb)) {
           artifacts.glbPath = texreconGlb;
         } else if (fs.existsSync(baseGlb)) {
           artifacts.glbPath = baseGlb;

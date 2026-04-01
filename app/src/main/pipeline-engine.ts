@@ -61,16 +61,15 @@ export class PipelineEngine {
     return new Promise((resolve, reject) => {
       this.stderrBuffer = [];
 
-      const args = [
-        "run", "-n", config.condaEnv,
-        "python", config.scriptPath,
-        "--config", config.configJsonPath,
-      ];
+      // Source conda directly — .bashrc guards against non-interactive shells,
+      // so conda init at line ~119 is never reached even with bash -l
+      const condaInit = 'source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/anaconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/miniforge3/etc/profile.d/conda.sh" 2>/dev/null';
+      const condaCmd = `${condaInit} && conda run -n '${config.condaEnv}' python '${config.scriptPath}' --config '${config.configJsonPath}'`;
 
-      logInfo("pipeline", `Starting stage: conda ${args.join(" ")}`);
+      logInfo("pipeline", `Starting stage: conda run -n ${config.condaEnv} python ${config.scriptPath}`);
       logInfo("pipeline", `  cwd: ${config.projectRoot}`);
 
-      const proc = spawn("conda", args, {
+      const proc = spawn("bash", ["-c", condaCmd], {
         cwd: config.projectRoot,
         env: { ...process.env },
         stdio: ["ignore", "pipe", "pipe"],

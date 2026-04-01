@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "electron:dev": "node scripts/dev.js",
     "electron:build": "tsc && vite build && electron-builder",
+    "electron:build:linux": "tsc && vite build && electron-builder --linux AppImage",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"
   },
