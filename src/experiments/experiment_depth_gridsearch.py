@@ -108,27 +108,23 @@ def build_candidate_grid(pc_path, mesh):
     grid_xy = np.array(np.meshgrid(xs, ys)).reshape(2, -1).T
     print(f"  Raw grid: {len(grid_xy)} candidates")
 
-    # Filter: raycast downward to check for floor hit
+    # Filter: keep candidates that fall inside the building footprint
+    # Use 2D occupancy — bin point cloud XY into a grid, keep occupied cells
     scene = o3d.t.geometry.RaycastingScene()
     t_mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
     scene.add_triangles(t_mesh)
 
-    # Cast rays straight down from above ceiling
-    ceiling_z = np.percentile(pts[:, 2], 95) + 1.0
-    origins = np.zeros((len(grid_xy), 3), dtype=np.float32)
-    origins[:, 0] = grid_xy[:, 0]
-    origins[:, 1] = grid_xy[:, 1]
-    origins[:, 2] = ceiling_z
-    directions = np.zeros_like(origins)
-    directions[:, 2] = -1.0  # straight down
+    # Only keep points near floor/wall height for occupancy (skip ceiling)
+    wall_mask = pts[:, 2] < (floor_z + 1.5)
+    wall_pts = pts[wall_mask, :2]
 
-    rays = np.concatenate([origins, directions], axis=1)
-    result = scene.cast_rays(o3d.core.Tensor(rays))
-    t_hit = result["t_hit"].numpy()
-
-    # Keep candidates where a floor was hit at reasonable distance
-    floor_hit_z = ceiling_z - t_hit
-    valid = np.isfinite(t_hit) & (floor_hit_z < cam_z) & (floor_hit_z > floor_z - 0.5)
+    # For each candidate, check if there are wall points within GRID_SPACING
+    from scipy.spatial import cKDTree
+    tree = cKDTree(wall_pts)
+    dists, _ = tree.query(grid_xy, k=1)
+    # Keep candidates that are near walls (within 2x grid spacing)
+    # but not TOO close (inside a wall)
+    valid = (dists < GRID_SPACING * 3.0) & (dists > 0.3)
 
     candidates = np.zeros((valid.sum(), 3), dtype=np.float32)
     candidates[:, 0] = grid_xy[valid, 0]
