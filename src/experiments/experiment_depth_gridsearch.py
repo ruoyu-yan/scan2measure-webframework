@@ -13,12 +13,12 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -32,8 +32,7 @@ PANO_NAMES = [
 
 GRID_SPACING = 0.5          # meters
 CAMERA_HEIGHT = 1.5         # meters above detected floor
-POISSON_DEPTH = 9
-VOXEL_SIZE = 0.02           # meters for downsampling before meshing
+VOXEL_SIZE = 0.05           # meters — coarser for speed (still ~1M points)
 RENDER_H, RENDER_W = 512, 1024
 POLE_MASK_RATIO = 0.1       # exclude top/bottom 10% of rows
 MIN_VALID_PIXELS = 1000     # skip candidates with too few valid pixels
@@ -43,58 +42,28 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 PC_PATH = ROOT / "data" / "raw_point_cloud" / f"{POINT_CLOUD_NAME}.ply"
 DAP_DIR = ROOT / "data" / "pano" / "dap_depth"
 OUTPUT_DIR = ROOT / "data" / "experiments" / "depth_gridsearch"
-MESH_CACHE = OUTPUT_DIR / "mesh_cache.ply"
 
 
-# ── Step 1: Mesh ────────────────────────────────────────────────────────────
+# ── Step 1: Load point cloud ─────────────────────────────────────────────────
 
-def get_or_create_mesh(pc_path, cache_path):
-    """Load cached mesh or create via Poisson reconstruction."""
-    if cache_path.exists():
-        print(f"Loading cached mesh from {cache_path.name}...")
-        return o3d.io.read_triangle_mesh(str(cache_path))
-
+def load_point_cloud(pc_path):
+    """Load and downsample the point cloud."""
     print("Loading point cloud...")
     pcd = o3d.io.read_point_cloud(str(pc_path))
-    print(f"  {len(pcd.points)} points")
+    pts = np.asarray(pcd.points)
+    print(f"  {len(pts)} points")
 
     print(f"  Voxel downsampling to {VOXEL_SIZE}m...")
     pcd = pcd.voxel_down_sample(VOXEL_SIZE)
-    print(f"  {len(pcd.points)} points after downsample")
-
-    print("  Estimating normals...")
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
-    )
-    pcd.orient_normals_consistent_tangent_plane(k=15)
-
-    print(f"  Poisson reconstruction (depth={POISSON_DEPTH})...")
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=POISSON_DEPTH
-    )
-
-    # Trim low-density vertices
-    densities = np.asarray(densities)
-    threshold = np.quantile(densities, 0.05)
-    vertices_to_remove = densities < threshold
-    mesh.remove_vertices_by_mask(vertices_to_remove)
-    mesh.compute_vertex_normals()
-
-    print(f"  Mesh: {len(mesh.vertices)} vertices, {len(mesh.triangles)} triangles")
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    o3d.io.write_triangle_mesh(str(cache_path), mesh)
-    print(f"  Cached to {cache_path.name}")
-    return mesh
+    pts = np.asarray(pcd.points).astype(np.float32)
+    print(f"  {len(pts)} points after downsample")
+    return pts
 
 
 # ── Step 2: Candidate grid ──────────────────────────────────────────────────
 
-def build_candidate_grid(pc_path, mesh):
+def build_candidate_grid(pts):
     """Generate candidate camera positions on a 2D grid above the floor."""
-    pcd = o3d.io.read_point_cloud(str(pc_path))
-    pts = np.asarray(pcd.points)
-
     # Detect floor and compute camera height
     floor_z = np.percentile(pts[:, 2], 5)
     cam_z = floor_z + CAMERA_HEIGHT
@@ -109,23 +78,16 @@ def build_candidate_grid(pc_path, mesh):
     print(f"  Raw grid: {len(grid_xy)} candidates")
 
     # Filter: keep candidates inside the building footprint using 2D occupancy
-    # Project ALL points to XY, bin into a 2D histogram, keep cells with points
-    scene = o3d.t.geometry.RaycastingScene()
-    t_mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
-    scene.add_triangles(t_mesh)
-
     bin_size = GRID_SPACING
     x_bins = np.arange(x_min, x_max + bin_size, bin_size)
     y_bins = np.arange(y_min, y_max + bin_size, bin_size)
     occupancy, _, _ = np.histogram2d(pts[:, 0], pts[:, 1], bins=[x_bins, y_bins])
 
-    # For each candidate, check if its cell has enough points
     cx = np.digitize(grid_xy[:, 0], x_bins) - 1
     cy = np.digitize(grid_xy[:, 1], y_bins) - 1
     cx = np.clip(cx, 0, occupancy.shape[0] - 1)
     cy = np.clip(cy, 0, occupancy.shape[1] - 1)
     cell_counts = occupancy[cx, cy]
-    # Cells with >50 points are inside the building (TLS is dense)
     valid = cell_counts > 50
 
     candidates = np.zeros((valid.sum(), 3), dtype=np.float32)
@@ -133,78 +95,104 @@ def build_candidate_grid(pc_path, mesh):
     candidates[:, 1] = grid_xy[valid, 1]
     candidates[:, 2] = cam_z
     print(f"  Filtered grid: {len(candidates)} candidates")
-    return candidates, scene
+    return candidates
 
 
-# ── Step 3: Equirectangular raycasting ───────────────────────────────────────
+# ── Step 3: Point cloud depth rendering ──────────────────────────────────────
 
-def make_equirect_ray_directions(H, W):
-    """Generate unit ray directions for equirectangular projection.
+def render_depth_from_pc(pts, position, H, W):
+    """Render equirectangular depth by projecting points onto a z-buffer.
 
-    Returns (H, W, 3) float32. Convention: Z-up (matches TLS point cloud).
-    Azimuth 0 = +X direction, increases counterclockwise.
-    Elevation 0 = horizon, +pi/2 = up (Z+), -pi/2 = down (Z-).
+    Projects ALL points (already downsampled) from the candidate position.
+    Uses vectorized sort + index assignment for z-buffer.
+
+    Returns (H, W) float32 depth (0 where no point hit).
     """
-    v, u = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
-    # Elevation: top row = +pi/2 (up), bottom = -pi/2 (down)
-    elevation = (0.5 - (v + 0.5) / H) * np.pi
-    # Azimuth: left to right = 0 to 2*pi
-    azimuth = (u + 0.5) / W * 2.0 * np.pi
+    rel = pts - position
+    dist = np.sqrt(rel[:, 0]**2 + rel[:, 1]**2 + rel[:, 2]**2)
 
-    dx = np.cos(elevation) * np.cos(azimuth)
-    dy = np.cos(elevation) * np.sin(azimuth)
-    dz = np.sin(elevation)
-    return np.stack([dx, dy, dz], axis=-1).astype(np.float32)
+    # Skip points too close
+    valid = dist > 0.1
+    rel = rel[valid]
+    dist = dist[valid]
 
+    # Spherical coordinates (Z-up)
+    azimuth = np.arctan2(rel[:, 1], rel[:, 0])
+    elevation = np.arcsin(np.clip(rel[:, 2] / dist, -1, 1))
 
-def raycast_depth(scene, position, ray_dirs):
-    """Render equirectangular depth from a single position.
+    # Map to pixel coordinates
+    u = (((azimuth / (2 * np.pi)) % 1.0) * W).astype(np.int32)
+    v = ((0.5 - elevation / np.pi) * H).astype(np.int32)
+    np.clip(u, 0, W - 1, out=u)
+    np.clip(v, 0, H - 1, out=v)
 
-    Returns (H, W) float32 depth (inf where no hit).
-    """
-    H, W, _ = ray_dirs.shape
-    origins = np.broadcast_to(position, ray_dirs.shape).copy()
-    rays = np.concatenate([origins, ray_dirs], axis=-1).reshape(-1, 6)
-    result = scene.cast_rays(o3d.core.Tensor(rays.astype(np.float32)))
-    depth = result["t_hit"].numpy().reshape(H, W)
+    # Z-buffer: sort farthest-first, write to array (nearest overwrites)
+    order = np.argsort(-dist)
+    depth = np.zeros((H, W), dtype=np.float32)
+    depth[v[order], u[order]] = dist[order]
+
     return depth
 
 
 # ── Step 4: Depth comparison ────────────────────────────────────────────────
 
+NUM_AZIMUTH_SHIFTS = 18  # test every 20 degrees
+
+
 def compare_depths(rendered, estimated):
-    """Compute log-depth Pearson correlation between rendered and estimated.
+    """Compare depths with azimuth rotation search.
 
-    Both are (H, W) float32. Returns (score, absrel) or (nan, nan) if
-    insufficient valid pixels.
+    Tests NUM_AZIMUTH_SHIFTS horizontal shifts of the rendered depth,
+    using properly normalized Pearson correlation of log-depth.
+
+    Returns (best_score, best_absrel, best_shift_columns).
     """
-    H = rendered.shape[0]
+    H, W = rendered.shape
     pole_margin = int(H * POLE_MASK_RATIO)
+    shift_step = W // NUM_AZIMUTH_SHIFTS
 
-    # Mask: valid depth, exclude poles
-    mask = np.ones_like(rendered, dtype=bool)
-    mask[:pole_margin, :] = False
-    mask[-pole_margin:, :] = False
-    mask &= np.isfinite(rendered) & (rendered > 0.01)
-    mask &= (estimated > 1e-6)
+    # Precompute estimated log-depth (doesn't change across shifts)
+    e_mask_base = (estimated > 1e-6)
+    e_mask_base[:pole_margin, :] = False
+    e_mask_base[-pole_margin:, :] = False
+    log_e = np.zeros_like(estimated)
+    log_e[e_mask_base] = np.log(estimated[e_mask_base])
 
-    if mask.sum() < MIN_VALID_PIXELS:
-        return float("nan"), float("nan")
+    best_score = -999.0
+    best_absrel = 999.0
+    best_shift = 0
 
-    log_r = np.log(rendered[mask])
-    log_e = np.log(estimated[mask])
+    for i in range(NUM_AZIMUTH_SHIFTS):
+        shift = i * shift_step
+        shifted = np.roll(rendered, shift, axis=1)
 
-    # Pearson correlation of log-depth (scale-invariant)
-    log_r_n = (log_r - log_r.mean()) / (log_r.std() + 1e-8)
-    log_e_n = (log_e - log_e.mean()) / (log_e.std() + 1e-8)
-    score = np.mean(log_r_n * log_e_n)
+        # Combined mask
+        mask = e_mask_base & (shifted > 0.01)
+        n_valid = mask.sum()
+        if n_valid < MIN_VALID_PIXELS:
+            continue
 
-    # AbsRel after median scale alignment
-    scale = np.median(rendered[mask]) / np.median(estimated[mask])
-    aligned = estimated[mask] * scale
-    absrel = np.mean(np.abs(rendered[mask] - aligned) / rendered[mask])
+        log_r = np.log(shifted[mask])
+        le = log_e[mask]
 
-    return float(score), float(absrel)
+        # Pearson correlation
+        r_mean, e_mean = log_r.mean(), le.mean()
+        r_std, e_std = log_r.std(), le.std()
+        if r_std < 1e-8 or e_std < 1e-8:
+            continue
+        score = float(np.mean((log_r - r_mean) * (le - e_mean)) / (r_std * e_std))
+
+        if score > best_score:
+            best_score = score
+            best_shift = shift
+            # AbsRel at this shift
+            scale = np.median(shifted[mask]) / np.median(estimated[mask])
+            aligned = estimated[mask] * scale
+            best_absrel = float(np.mean(np.abs(shifted[mask] - aligned) / shifted[mask]))
+
+    if best_score < -10:
+        return float("nan"), float("nan"), 0
+    return best_score, best_absrel, best_shift
 
 
 # ── Step 6: Visualization ───────────────────────────────────────────────────
@@ -275,22 +263,13 @@ def main():
     t_start = time.time()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Mesh
-    print("=== Step 1: Mesh ===")
-    mesh = get_or_create_mesh(PC_PATH, MESH_CACHE)
+    # Step 1: Load point cloud
+    print("=== Step 1: Load point cloud ===")
+    pts = load_point_cloud(PC_PATH)
 
     # Step 2: Candidate grid
     print("\n=== Step 2: Candidate grid ===")
-    candidates, scene = build_candidate_grid(PC_PATH, mesh)
-
-    # Step 3: Precompute ray directions
-    print("\n=== Step 3: Precompute ray directions ===")
-    ray_dirs = make_equirect_ray_directions(RENDER_H, RENDER_W)
-    print(f"  Ray directions shape: {ray_dirs.shape}")
-
-    # Load point cloud for top-down viz
-    pcd = o3d.io.read_point_cloud(str(PC_PATH))
-    pts = np.asarray(pcd.points)
+    candidates = build_candidate_grid(pts)
 
     # Step 4-5: Compare and select per panorama
     print("\n=== Step 4-5: Compare depths ===")
@@ -313,36 +292,42 @@ def main():
         best_absrel = 999.0
         best_idx = -1
         best_rendered = None
+        best_shift = 0
 
         t_pano = time.time()
         for i, pos in enumerate(candidates):
-            rendered = raycast_depth(scene, pos, ray_dirs)
-            score, absrel = compare_depths(rendered, dap_depth)
+            rendered = render_depth_from_pc(pts, pos, RENDER_H, RENDER_W)
+            score, absrel, shift = compare_depths(rendered, dap_depth)
 
             if not np.isnan(score) and score > best_score:
                 best_score = score
                 best_absrel = absrel
                 best_idx = i
+                best_shift = shift
                 best_rendered = rendered.copy()
 
         elapsed = time.time() - t_pano
         if best_idx >= 0:
             pos = candidates[best_idx].tolist()
+            azimuth_deg = best_shift / RENDER_W * 360.0
             print(
                 f"  {pano_name}: best position = [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}], "
-                f"score = {best_score:.3f}, absrel = {best_absrel:.3f} ({elapsed:.1f}s)"
+                f"score = {best_score:.3f}, absrel = {best_absrel:.3f}, "
+                f"azimuth_shift = {azimuth_deg:.0f}deg ({elapsed:.1f}s)"
             )
             results[pano_name] = {
                 "position": pos,
                 "score": best_score,
                 "absrel": best_absrel,
+                "azimuth_shift_deg": azimuth_deg,
             }
             best_positions.append(pos)
             best_names.append(pano_name)
 
-            # Per-pano debug viz
+            # Per-pano debug viz — show the ALIGNED rendered depth
+            aligned_rendered = np.roll(best_rendered, best_shift, axis=1)
             render_depth_comparison(
-                dap_depth, best_rendered, best_score, pano_name,
+                dap_depth, aligned_rendered, best_score, pano_name,
                 OUTPUT_DIR / f"depth_comparison_{pano_name}.png",
             )
         else:
