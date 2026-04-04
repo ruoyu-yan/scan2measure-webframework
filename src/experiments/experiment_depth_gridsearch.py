@@ -108,23 +108,25 @@ def build_candidate_grid(pc_path, mesh):
     grid_xy = np.array(np.meshgrid(xs, ys)).reshape(2, -1).T
     print(f"  Raw grid: {len(grid_xy)} candidates")
 
-    # Filter: keep candidates that fall inside the building footprint
-    # Use 2D occupancy — bin point cloud XY into a grid, keep occupied cells
+    # Filter: keep candidates inside the building footprint using 2D occupancy
+    # Project ALL points to XY, bin into a 2D histogram, keep cells with points
     scene = o3d.t.geometry.RaycastingScene()
     t_mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
     scene.add_triangles(t_mesh)
 
-    # Only keep points near floor/wall height for occupancy (skip ceiling)
-    wall_mask = pts[:, 2] < (floor_z + 1.5)
-    wall_pts = pts[wall_mask, :2]
+    bin_size = GRID_SPACING
+    x_bins = np.arange(x_min, x_max + bin_size, bin_size)
+    y_bins = np.arange(y_min, y_max + bin_size, bin_size)
+    occupancy, _, _ = np.histogram2d(pts[:, 0], pts[:, 1], bins=[x_bins, y_bins])
 
-    # For each candidate, check if there are wall points within GRID_SPACING
-    from scipy.spatial import cKDTree
-    tree = cKDTree(wall_pts)
-    dists, _ = tree.query(grid_xy, k=1)
-    # Keep candidates that are near walls (within 2x grid spacing)
-    # but not TOO close (inside a wall)
-    valid = (dists < GRID_SPACING * 3.0) & (dists > 0.3)
+    # For each candidate, check if its cell has enough points
+    cx = np.digitize(grid_xy[:, 0], x_bins) - 1
+    cy = np.digitize(grid_xy[:, 1], y_bins) - 1
+    cx = np.clip(cx, 0, occupancy.shape[0] - 1)
+    cy = np.clip(cy, 0, occupancy.shape[1] - 1)
+    cell_counts = occupancy[cx, cy]
+    # Cells with >50 points are inside the building (TLS is dense)
+    valid = cell_counts > 50
 
     candidates = np.zeros((valid.sum(), 3), dtype=np.float32)
     candidates[:, 0] = grid_xy[valid, 0]
