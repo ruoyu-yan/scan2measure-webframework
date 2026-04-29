@@ -8,10 +8,13 @@
 
 No build step or test runner. Dependencies (open3d, torch, shapely, scipy, opencv, matplotlib, pylsd-nova) installed manually. SAM3 scripts require `conda run -n sam3`. Meshing scripts require `conda run -n scan_env`.
 
-**Production pipeline (FGPL/V4 path):**
+**Production pipeline (SAM3 path):**
 ```bash
 python src/preprocessing/generate_density_image.py
-python src/segmentation/RoomFormer_inference.py
+conda run -n sam3 python src/segmentation/SAM3_room_segmentation.py
+python src/segmentation/SAM3_mask_to_polygons.py
+conda run -n sam3 python src/segmentation/SAM3_pano_footprint_extraction.py
+python src/floorplan/align_polygons_demo6.py
 python src/geometry_3d/point_cloud_geometry_baker_V4.py
 python src/geometry_3d/cluster_3d_lines.py
 python src/features_2d/image_feature_extractionV2.py
@@ -27,8 +30,8 @@ conda run -n scan_env python src/meshing/test_mvs_texturing.py
 
 ```
 src/
-├── preprocessing/       # generate_density_image, ply_to_xyz, map_RoomFormer_results_to_3d
-├── segmentation/        # RoomFormer_inference, LGT-Net_inference_demo2
+├── preprocessing/       # generate_density_image, ply_to_xyz
+├── segmentation/        # SAM3_room_segmentation, SAM3_mask_to_polygons, SAM3_pano_footprint_extraction, SAM3_pano_processing
 ├── geometry_3d/         # point_cloud_geometry_baker_V4, cluster_3d_lines, line_clustering_3d
 ├── features_2d/         # image_feature_extractionV2, pano_line_detector, line_analysis, pano_processing_virtual_camerasV2, lightweight_synthetic_renderer_V2
 ├── pose_estimation/     # multiroom_pose_estimation, pose_estimation_pipeline, pose_search, pose_refine, xdf_distance
@@ -45,16 +48,18 @@ archive/                 # Deprecated scripts, experiments, and repos — do not
 
 Cross-subfolder imports use `sys.path.insert(0, str(_SRC_ROOT / "<subfolder>"))`.
 
-## External Dependencies (Compiled)
+## External Dependencies (Submodules)
+
+All four are pinned as git submodules and built/applied via `scripts/setup-native.sh`.
 
 | Directory | Purpose |
 |-----------|---------|
-| `3DLineDetection/` | C++ 3D line segment detection (CMake build in `build/`) |
-| `mvs-texturing/` | C++ mesh texturing CLI (`build/apps/texrecon/texrecon`). Needs `libpng-dev libjpeg-dev libtiff-dev libtbb-dev`. MVE needs `-std=c++14` patch |
-| `PoissonRecon/` | Screened Poisson surface reconstruction CLI |
-| `RoomFormer/` | Floorplan polygon detection model |
-| `LGT-Net/` | Panoramic layout prediction model |
-| `sam3/` | Segment Anything Model 3 |
+| `3DLineDetection/` | C++ 3D line segment detection (CMake build in `build/`). Needs patch `scripts/patches/3dlinedetection.patch` (OpenCV 4.x rename + argv-driven main). |
+| `mvs-texturing/` | C++ mesh texturing CLI (`build/apps/texrecon/texrecon`). Needs `libpng-dev libjpeg-dev libtiff-dev libtbb-dev`. Needs patch `scripts/patches/mvs-texturing.patch` (MVE `-std=c++14`). |
+| `PoissonRecon/` | Screened Poisson surface reconstruction CLI. |
+| `sam3/` | Segment Anything Model 3. Weights auto-downloaded from HuggingFace `facebook/sam3` on first inference run. |
+
+Legacy: `RoomFormer/` and `LGT-Net/` are no longer used in the production pipeline. The corresponding inference scripts live in `archive/legacy_scripts/`.
 
 ## Key Conventions
 
