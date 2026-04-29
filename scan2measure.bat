@@ -38,7 +38,12 @@ if "!REPO_DIR_WSL!"=="" (
 
 echo Starting scan2measure from !REPO_DIR_WSL! ...
 
-wsl.exe bash -l -c "'!REPO_DIR_WSL!/app/release/scan2measure.AppImage'" 2> "%TEMP%\scan2measure_err.log"
+rem WSLg env vars (DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR) are normally set
+rem by WSL itself, but on a fresh wsl.exe invocation from cmd.exe they are
+rem occasionally missing - which makes Electron crash with
+rem "ozone_platform_x11.cc: Missing X server or $DISPLAY".
+rem Force WSLg defaults if nothing is already set.
+wsl.exe bash -l -c "DISPLAY=${DISPLAY:-:0} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} '!REPO_DIR_WSL!/app/release/scan2measure.AppImage'" 2> "%TEMP%\scan2measure_err.log"
 set "RC=!ERRORLEVEL!"
 
 if not "!RC!"=="0" (
