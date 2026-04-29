@@ -319,7 +319,8 @@ def render_topdown_composite(density_img, density_meta, cameras, room_polygons=N
     ax.imshow(density_img, cmap="gray", origin="upper")
 
     # RoomFormer polygons
-    if room_polygons is not None:
+    has_polygons = room_polygons is not None and len(room_polygons) > 0
+    if has_polygons:
         for poly in room_polygons:
             poly_arr = np.array(poly)
             poly_closed = np.vstack([poly_arr, poly_arr[0:1]])
@@ -329,8 +330,11 @@ def render_topdown_composite(density_img, density_meta, cameras, room_polygons=N
 
     legend_elements = [
         mpatches.Patch(facecolor="gray", edgecolor="gray", label="Density map"),
-        plt.Line2D([0], [0], color="lime", lw=2, label="Room polygon"),
     ]
+    if has_polygons:
+        legend_elements.append(
+            plt.Line2D([0], [0], color="lime", lw=2, label="Room polygon")
+        )
 
     for i, cam in enumerate(cameras):
         color = _CAMERA_COLORS[i % len(_CAMERA_COLORS)]

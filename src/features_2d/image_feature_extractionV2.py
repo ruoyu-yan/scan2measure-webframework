@@ -119,7 +119,7 @@ def main():
         "lines": lines.tolist(),
         "inter_2d": [g.tolist() for g in inters],
     }
-    with open(OUT_DIR / "fgpl_features.json", "w") as f:
+    with open(out_dir / "fgpl_features.json", "w") as f:
         json.dump(features, f)
     print(f"Saved fgpl_features.json ({sum(inter_counts)} intersections)")
 

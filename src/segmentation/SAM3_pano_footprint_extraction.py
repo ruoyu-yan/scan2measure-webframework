@@ -411,14 +411,14 @@ def save_debug_figure(stem, img_np, floor_bnd, ceil_bnd, fused_bnd,
 # ---------------------------------------------------------
 # PROCESS ONE PANORAMA
 # ---------------------------------------------------------
-def process_pano(processor, img_path):
+def process_pano(processor, img_path, out_dir=None):
     """Segment, fuse, project, regularize, save layout JSON + debug figure."""
     stem = img_path.stem
     image = Image.open(str(img_path)).convert("RGB")
     img_np = np.array(image)
     h, w = img_np.shape[:2]
 
-    pano_out = OUTPUT_DIR / stem
+    pano_out = (out_dir or OUTPUT_DIR) / stem
     pano_out.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'=' * 60}")
@@ -515,7 +515,7 @@ def main():
 
     for i, img_path in enumerate(jpg_files):
         progress(i + 1, len(jpg_files), f"Processing {img_path.stem}")
-        process_pano(processor, img_path)
+        process_pano(processor, img_path, out_dir=out_dir)
 
     print(f"\nDone. Results in: {out_dir}")
 
