@@ -58,6 +58,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   readImage: (filePath: string) =>
     ipcRenderer.invoke("artifacts:read-image", filePath),
 
+  // Environment management
+  checkEnvironment: () => ipcRenderer.invoke("environment:check"),
+  setupEnvironment: (envName: string) =>
+    ipcRenderer.invoke("environment:setup", envName),
+  onSetupProgress: (callback: (data: { env: string; phase: string; message: string }) => void) =>
+    ipcRenderer.on("environment:setup-progress", (_event, data) => callback(data)),
+  onSetupLog: (callback: (line: string) => void) =>
+    ipcRenderer.on("environment:setup-log", (_event, line) => callback(line)),
+  cancelEnvironmentSetup: () => ipcRenderer.invoke("environment:cancel"),
+
   // Remove listeners (restricted to pipeline channels only)
   removeAllListeners: (channel: string) => {
     const ALLOWED_CHANNELS = [
@@ -65,6 +75,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       "pipeline:log",
       "pipeline:stage-complete",
       "pipeline:stage-error",
+      "environment:setup-progress",
+      "environment:setup-log",
     ];
     if (ALLOWED_CHANNELS.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);

@@ -24,6 +24,11 @@ declare global {
       findMinimapPng: (glbPath: string) => Promise<unknown>;
       resolveArtifacts: (projectId: string, stageId: string) => Promise<unknown>;
       readImage: (filePath: string) => Promise<string>;
+      checkEnvironment: () => Promise<unknown>;
+      setupEnvironment: (envName: string) => Promise<unknown>;
+      onSetupProgress: (callback: (data: { env: string; phase: string; message: string }) => void) => void;
+      onSetupLog: (callback: (line: string) => void) => void;
+      cancelEnvironmentSetup: () => Promise<unknown>;
       removeAllListeners: (channel: string) => void;
     };
   }

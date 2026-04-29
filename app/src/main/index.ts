@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { PipelineEngine } from "./pipeline-engine";
 import { ProjectStore } from "./project-store";
+import { EnvironmentManager } from "./environment-manager";
 import { launchUnity } from "./unity-launcher";
 import { initLogger, logInfo, logError, closeLogger, getLogPath } from "./logger";
 
@@ -33,6 +34,7 @@ const PROJECT_ROOT = resolveProjectRoot();
 
 let mainWindow: BrowserWindow | null = null;
 let pipelineEngine: PipelineEngine | null = null;
+let envManager: EnvironmentManager | null = null;
 let projectStore: ProjectStore;
 
 initLogger(PROJECT_ROOT);
@@ -78,6 +80,7 @@ function createWindow() {
 
   projectStore = new ProjectStore(PROJECT_ROOT);
   pipelineEngine = new PipelineEngine(mainWindow);
+  envManager = new EnvironmentManager(mainWindow, PROJECT_ROOT);
 }
 
 app.whenReady().then(() => {
@@ -183,6 +186,36 @@ ipcMain.handle(
   }
 );
 
+// -- IPC: Environment management -----------------------------------------------
+
+ipcMain.handle("environment:check", async () => {
+  if (!envManager) return { error: true, message: "No window" };
+  try {
+    const status = await envManager.check();
+    return { ok: true, status };
+  } catch (err) {
+    logError("ipc", `environment:check failed: ${(err as Error).message}`);
+    return { error: true, message: (err as Error).message };
+  }
+});
+
+ipcMain.handle("environment:setup", async (_event, envName: "scan_env" | "sam3") => {
+  if (!envManager) return { error: true, message: "No window" };
+  logInfo("ipc", `environment:setup starting for ${envName}`);
+  try {
+    await envManager.setup(envName);
+    return { ok: true };
+  } catch (err) {
+    logError("ipc", `environment:setup failed for ${envName}: ${(err as Error).message}`);
+    return { error: true, message: (err as Error).message };
+  }
+});
+
+ipcMain.handle("environment:cancel", () => {
+  envManager?.cancel();
+  return { ok: true };
+});
+
 // -- IPC: Write stage config JSON and return its path -------------------------
 
 ipcMain.handle(
@@ -224,6 +257,31 @@ ipcMain.handle(
       meshing: pcPath,                              // raw point cloud -> PoissonRecon + texrecon -> GLB
     };
 
+    // Stage-specific output_dir mapping (default: mesh dir)
+    const defaultOutputDir = pcName ? path.join(PROJECT_ROOT, "data", "mesh", pcName) : "";
+    const debugRendererDir = pcName
+      ? path.join(PROJECT_ROOT, "data", "debug_renderer", pcName)
+      : "";
+    const panoProcessingDir = path.join(PROJECT_ROOT, "data", "sam3_pano_processing");
+    const stageOutputDir: Record<string, string> = {
+      density_image: densityImageDir,                  // data/density_image/<pcName>
+      sam3_segmentation: sam3SegDir,                    // data/sam3_room_segmentation
+      sam3_polygons: pcName ? path.join(sam3SegDir, pcName) : "",  // data/sam3_room_segmentation/<pcName>
+      pano_footprints: panoProcessingDir,               // data/sam3_pano_processing
+      polygon_matching: pcName ? path.join(sam3SegDir, pcName) : "",  // data/sam3_room_segmentation/<pcName>
+      line_detection_3d: debugRendererDir,              // data/debug_renderer/<pcName>
+      line_detection_2d: path.join(PROJECT_ROOT, "data", "pano", "2d_feature_extracted"),
+      pose_estimation: poseEstimatesDir,                // data/pose_estimates/multiroom
+      colorization: texturedPlyDir,                     // data/textured_point_cloud/<pcName>
+      // meshing: uses defaultOutputDir (data/mesh/<pcName>) — correct as-is
+    };
+
+    // Per-pano stageIds look like "pano_footprints_<panoName>" — extract the
+    // base stage ID so the output_dir lookup still works.
+    const baseStageId = Object.keys(stageOutputDir).find((key) =>
+      stageId === key || stageId.startsWith(key + "_")
+    ) || stageId;
+
     const config: Record<string, unknown> = {
       point_cloud_path: pcPath,
       point_cloud_name: pcName,
@@ -234,12 +292,12 @@ ipcMain.handle(
       quality_tier: project.qualityTier || "balanced",
       // Inter-stage derived paths
       density_image_dir: densityImageDir,
-      input_path: stageInputPath[stageId] || "",
+      input_path: stageInputPath[baseStageId] || "",
       sam3_segmentation_dir: sam3SegDir,
       pose_estimates_dir: poseEstimatesDir,
       panorama_dir: path.join(PROJECT_ROOT, "data", "pano", "raw"),
       pose_json_path: path.join(poseEstimatesDir, "local_filter_results.json"),
-      output_dir: pcName ? path.join(PROJECT_ROOT, "data", "mesh", pcName) : "",
+      output_dir: stageOutputDir[baseStageId] || defaultOutputDir,
       ...overrides,
     };
 
