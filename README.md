@@ -116,7 +116,8 @@ See `CLAUDE.md` for a one-page cheat sheet of the source tree, pipeline stages, 
 
 ## Troubleshooting
 
-- **`scan2measure.bat` exits immediately** — open `%TEMP%\scan2measure_err.log` and check the WSL error. The most common cause is that WSL is not installed or `wsl.exe` is not on `PATH`.
+- **`scan2measure.bat` exits with code 139 / err log says "Missing X server" / "No working WSLg display server"** — WSLg's daemon (WSLgd) failed to start when WSL booted, leaving dangling Wayland/X11 socket symlinks. Fix: from a Windows PowerShell, run `wsl --shutdown`, wait a few seconds, then re-run the `.bat`. WSL will cold-start and WSLg should come up cleanly.
+- **`scan2measure.bat` exits immediately, no error message** — open `%TEMP%\scan2measure_err.log` and check the WSL error. The most common cause is that WSL is not installed or `wsl.exe` is not on `PATH`.
 - **App opens but Unity tour fails to start** — `unity-launcher.ts` looks for `unity/Build/VirtualTour.exe` next to the app. Confirm the file is there (the release zip ships it; the git checkout does not).
 - **Full Pipeline conda env setup hangs / fails** — the env-creation logs are visible in the app. Nine times out of ten this is the PyTorch CUDA wheel mismatch — make sure your NVIDIA driver supports CUDA 11.6.
 - **`huggingface_hub.utils._errors.GatedRepoError`** — you have not been approved for `facebook/sam3` yet. Visit the model page and request access; approval is manual.
