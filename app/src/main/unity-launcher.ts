@@ -17,21 +17,13 @@ function toWindowsPath(linuxPath: string): string {
 
 /**
  * Locate the Unity executable.
- * Searches for VirtualTour.exe in the expected build directory
- * relative to the project root: unity/Build/VirtualTour.exe
+ * Looks for VirtualTour.exe under <projectRoot>/unity/Build/.
  */
 function findUnityExe(projectRoot: string): string | null {
   const candidates = [
     path.join(projectRoot, "unity", "Build", "VirtualTour.exe"),
     path.join(projectRoot, "unity", "build", "VirtualTour.exe"),
   ];
-
-  if (IS_WSL) {
-    // Unity project lives on a Windows-native path (Unity Hub cannot create on WSL paths)
-    candidates.push("/mnt/e/OneDrive/File/Uni/KIT/WS25-26/Master Thesis/unity/VirtualTour/Build/VirtualTour.exe");
-  } else {
-    candidates.push("E:\\OneDrive\\File\\Uni\\KIT\\WS25-26\\Master Thesis\\unity\\VirtualTour\\Build\\VirtualTour.exe");
-  }
 
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
