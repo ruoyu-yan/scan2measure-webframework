@@ -38,7 +38,7 @@ The setup script does not install these. Install them first, in any order:
 | **Miniconda or Anaconda** (inside WSL) | Two conda environments (`scan_env`, `sam3`) are auto-created by the app on first launch | https://docs.conda.io/projects/miniconda/en/latest/ |
 | **Node.js 20+ and npm** (inside WSL) | Builds the Electron app | https://nodejs.org/ |
 | **NVIDIA GPU + CUDA driver** | Required by SAM3 inference | NVIDIA driver on Windows host; `nvidia-smi` should work in WSL |
-| **HuggingFace account, license accepted for `facebook/sam3`** | Model is gated (manual approval, may take a few hours) | https://huggingface.co/facebook/sam3 → Request access; then `pip install huggingface_hub && huggingface-cli login` |
+| **HuggingFace account, license accepted for `facebook/sam3`** | Model is gated; you must request access on the model page before the weights can download | https://huggingface.co/facebook/sam3 → Request access; then `pip install huggingface_hub && huggingface-cli login` |
 
 ### Setup steps
 
