@@ -1,0 +1,12 @@
+[submodule "PoissonRecon"]
+	path = PoissonRecon
+	url = https://github.com/mkazhdan/PoissonRecon.git
+[submodule "sam3"]
+	path = sam3
+	url = https://github.com/facebookresearch/sam3.git
+[submodule "mvs-texturing"]
+	path = mvs-texturing
+	url = https://github.com/nmoehrle/mvs-texturing.git
+[submodule "3DLineDetection"]
+	path = 3DLineDetection
+	url = https://github.com/xiaohulugo/3DLineDetection.git

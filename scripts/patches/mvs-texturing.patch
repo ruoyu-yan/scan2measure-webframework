@@ -1,0 +1,15 @@
+diff --git a/elibs/CMakeLists.txt b/elibs/CMakeLists.txt
+index 0e4c833..a5fab18 100644
+--- a/elibs/CMakeLists.txt
++++ b/elibs/CMakeLists.txt
+@@ -35,8 +35,9 @@ externalproject_add(ext_mve
+     GIT_REPOSITORY  https://github.com/nmoehrle/mve.git
+     UPDATE_COMMAND  ""
+     SOURCE_DIR      ${CMAKE_SOURCE_DIR}/elibs/mve
++    PATCH_COMMAND   sed -i "s/CXXFLAGS += -pthread/CXXFLAGS += -pthread -std=c++14/" ${CMAKE_SOURCE_DIR}/elibs/mve/Makefile.inc
+     CONFIGURE_COMMAND ""
+-    BUILD_COMMAND   make -C libs/mve && make -C libs/util #not platform independent
++    BUILD_COMMAND   make CXX=${CMAKE_CXX_COMPILER} -C libs/mve && make CXX=${CMAKE_CXX_COMPILER} -C libs/util
+     BUILD_IN_SOURCE 1
+     INSTALL_COMMAND ""
+ )
